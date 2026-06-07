@@ -1,0 +1,13 @@
+{
+  "id": "panel-manager",
+  "name": "Plugin Panel",
+  "version": "1.0.0",
+  "author": "Neogebra",
+  "description": "Neogebra's built-in plugin panel (toggle with Right-Shift). It is itself a plugin, loaded with the framework and cannot be removed.",
+  "main": "index.js",
+  "icon": "icon.png",
+  "builtin": true,
+  "engines": {
+    "ngbLoader": ">=1.0.0"
+  }
+}

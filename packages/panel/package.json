@@ -1,0 +1,18 @@
+{
+  "name": "@neogebra/panel",
+  "version": "1.0.0",
+  "description": "GGB-Extend plugin manager panel — a Svelte UI compiled to a single IIFE bundle, mounted into a closed Shadow DOM inside GeoGebra.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "build:watch": "node build.mjs --watch",
+    "dev": "node build.mjs --dev"
+  },
+  "devDependencies": {
+    "esbuild": "^0.21.5",
+    "esbuild-svelte": "^0.8.1",
+    "svelte": "^4.2.18"
+  },
+  "//note": "Components use plain CSS/JS, so svelte-preprocess is intentionally not required."
+}

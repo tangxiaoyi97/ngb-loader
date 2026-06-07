@@ -1,0 +1,11 @@
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+  <rect width="256" height="256" rx="56" fill="#efeefc"/>
+  <path d="M128 206
+           C128 206 44 158 44 100
+           C44 71 67 50 94 50
+           C112 50 124 61 128 70
+           C132 61 144 50 162 50
+           C189 50 212 71 212 100
+           C212 158 128 206 128 206 Z"
+        fill="#6557d3"/>
+</svg>

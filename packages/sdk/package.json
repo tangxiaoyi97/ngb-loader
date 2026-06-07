@@ -1,0 +1,19 @@
+{
+  "name": "@neogebra/sdk",
+  "version": "1.0.0",
+  "description": "GGB-Extend developer SDK — a modern Promise/Observable wrapper around the GeoGebra applet API, plus the plugin lifecycle contract and TypeScript types.",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/index.js",
+  "types": "types/ggb-extend.d.ts",
+  "exports": {
+    ".": {
+      "types": "./types/ggb-extend.d.ts",
+      "import": "./src/index.js"
+    }
+  },
+  "files": [
+    "src",
+    "types"
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "name": "ggb-extend-e2e-fixture-core",
+  "version": "0.1.0",
+  "description": "A tiny Electron app that stands in for GeoGebra in E2E: it creates a BrowserWindow with a preload + a fake window.ggbApplet, so the proxy's patch + panel injection can be exercised headlessly under Xvfb.",
+  "main": "main.js",
+  "private": true
+}

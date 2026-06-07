@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>GGB-Extend E2E Fixture (fake GeoGebra)</title>
+  <style>
+    html,body{height:100%;margin:0;font-family:sans-serif;background:#f3f5fa;color:#333}
+    .stage{display:flex;align-items:center;justify-content:center;height:100%}
+  </style>
+</head>
+<body>
+  <div class="stage"><h1 id="title">Fake GeoGebra canvas</h1></div>
+  <script>
+    // Define a fake ggbApplet so the SDK / panel can detect it in the main world.
+    window.ggbApplet = {
+      _objs: {},
+      evalCommand(cmd){ window.ipc && window.ipc.send('log', 'evalCommand: ' + cmd); return true; },
+      getValue(){ return 0; },
+      getXcoord(){ return 0; }, getYcoord(){ return 0; }, getZcoord(){ return 0; },
+      setColor(){}, setVisible(){}, deleteObject(){},
+      getObjectNumber(){ return 0; }, getObjectName(){ return ''; }, getObjectType(){ return ''; },
+      registerAddListener(){}, registerRemoveListener(){}, registerUpdateListener(){},
+      registerRenameListener(){}, registerClearListener(){}, registerClickListener(){},
+    };
+    window.ipc && window.ipc.send('log', 'fake ggbApplet ready');
+  </script>
+</body>
+</html>

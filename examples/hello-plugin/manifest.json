@@ -1,0 +1,11 @@
+{
+  "id": "hello-plugin",
+  "name": "Hello Plugin",
+  "version": "1.0.0",
+  "author": "Neogebra",
+  "description": "A friendly demo: drops a labelled point on the canvas when enabled and logs construction events. A minimal, complete reference plugin.",
+  "main": "src/index.js",
+  "icon": "icon.png",
+  "engines": { "ngbLoader": ">=1.0.0" },
+  "permissions": []
+}

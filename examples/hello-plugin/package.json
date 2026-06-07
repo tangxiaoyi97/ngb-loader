@@ -1,0 +1,12 @@
+{
+  "name": "@neogebra/example-hello-plugin",
+  "version": "1.0.0",
+  "description": "Reference Neogebra plugin.",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/index.js",
+  "private": true,
+  "dependencies": {
+    "@neogebra/sdk": "*"
+  }
+}

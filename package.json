@@ -1,0 +1,36 @@
+{
+  "name": "neogebra",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Neogebra — a lightweight, non-invasive plugin framework for the GeoGebra desktop app. A desktop manager injects a proxy layer that loads plugins dynamically at startup, without modifying GeoGebra's own code.",
+  "license": "MIT",
+  "homepage": "https://github.com/tangxiaoyi97/ngb-loader",
+  "workspaces": [
+    "packages/injector-core",
+    "packages/installer",
+    "packages/proxy-core",
+    "packages/sdk",
+    "packages/desktop",
+    "examples/hello-plugin"
+  ],
+  "scripts": {
+    "test": "node scripts/run-tests.mjs",
+    "test:e2e": "node tests/e2e/run-e2e.mjs",
+    "sync-version": "node scripts/sync-version.mjs",
+    "build:proxy": "node scripts/sync-version.mjs && node scripts/build-proxy.mjs",
+    "installer": "npm --workspace @neogebra/installer run start",
+    "cli": "node packages/injector-core/bin/ggb-extend.js",
+    "doctor": "node scripts/doctor.mjs",
+    "clean": "node scripts/clean.mjs",
+    "reset-user-data": "node scripts/reset-user-data.mjs",
+    "build": "npm run build:proxy",
+    "build:desktop": "npm run build:proxy && npm --workspace @neogebra/desktop run build:renderer",
+    "desktop": "npm run build:proxy && npm --workspace @neogebra/desktop run build:renderer && npm --workspace @neogebra/desktop run start"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "jsdom": "^24.1.3"
+  }
+}

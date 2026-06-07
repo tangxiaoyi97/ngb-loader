@@ -1,0 +1,24 @@
+<svg viewBox="0 0 1920 1920" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1920" height="1920" rx="420" fill="#ffffff"/>
+  <g stroke="#5b5b5b" stroke-width="46" stroke-linecap="round">
+    <line x1="920" y1="1000" x2="912"  y2="365"/>
+    <line x1="920" y1="1000" x2="278"  y2="826"/>
+    <line x1="920" y1="1000" x2="1651" y2="730"/>
+    <line x1="920" y1="1000" x2="500"  y2="1555"/>
+    <line x1="920" y1="1000" x2="1382" y2="1498"/>
+  </g>
+  <g>
+    <circle cx="912"  cy="365"  r="190" fill="#090909"/>
+    <circle cx="912"  cy="365"  r="130" fill="#7d7df3"/>
+    <circle cx="278"  cy="826"  r="190" fill="#090909"/>
+    <circle cx="278"  cy="826"  r="130" fill="#7d7df3"/>
+    <circle cx="1651" cy="730"  r="190" fill="#090909"/>
+    <circle cx="1651" cy="730"  r="130" fill="#7d7df3"/>
+    <circle cx="500"  cy="1555" r="190" fill="#090909"/>
+    <circle cx="500"  cy="1555" r="130" fill="#7d7df3"/>
+    <circle cx="1382" cy="1498" r="190" fill="#090909"/>
+    <circle cx="1382" cy="1498" r="130" fill="#7d7df3"/>
+    <circle cx="920"  cy="1000" r="210" fill="#090909"/>
+    <circle cx="920"  cy="1000" r="146" fill="#6557d3"/>
+  </g>
+</svg>

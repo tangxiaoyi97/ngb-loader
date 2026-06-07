@@ -1,0 +1,12 @@
+// @neogebra/sdk — public entry point for plugin authors.
+export { GgbCore, whenAppletReady } from './ggb-core.js';
+export { Emitter } from './emitter.js';
+export {
+  Plugin,
+  PluginContext,
+  MemoryStorage,
+  validateManifest,
+  runLifecycle,
+} from './plugin.js';
+
+export const VERSION = '1.0.0';

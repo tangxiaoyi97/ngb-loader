@@ -1,0 +1,37 @@
+node_modules/
+dist/
+build/
+*.log
+.DS_Store
+.env
+coverage/
+
+# Build artifacts copied into the proxy
+packages/proxy-core/assets/panel.bundle.js
+
+# E2E / test scratch
+tests/.tmp/
+tests/e2e/.cache/
+playwright-report/
+test-results/
+
+# Local copies of the host app for testing (never commit GeoGebra binaries —
+# they're large, licensed, and not ours to redistribute). The spec keeps the
+# test GeoGebra under test/ or ggb-test/; ignore both, plus any .app bundle and
+# GeoGebra document files.
+test/
+ggb-test/
+ggb-test-*/
+*.app/
+*.ggb
+
+# Desktop packaging
+packages/desktop/vendor/
+packages/desktop/release/
+packages/*/renderer/dist/
+
+# Misc OS / editor noise
+Thumbs.db
+.idea/
+.vscode/
+*.tmp
