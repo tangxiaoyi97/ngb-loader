@@ -29,12 +29,16 @@ const REPO = path.join(__dirname, '..', '..');
 const PROXY_DIST = path.join(REPO, 'packages', 'proxy-core', 'dist');
 const PRELOAD = path.join(PROXY_DIST, 'preload.js');
 const RUNTIME_BUNDLE = path.join(PROXY_DIST, 'assets', 'runtime.bundle.js');
+const PRELOAD_SRC = path.join(REPO, 'packages', 'proxy-core', 'src', 'preload.js');
 
 function haveJsdom() { try { require.resolve('jsdom'); return true; } catch { return false; } }
 
 test('renderer flow: preload chains original, boots runtime, loads builtin panel + user plugin', { skip: !haveJsdom() && 'jsdom not installed' }, async () => {
   const cp = require('child_process');
-  if (!fs.existsSync(RUNTIME_BUNDLE) || !fs.existsSync(PRELOAD)) {
+  const distIsStale = !fs.existsSync(RUNTIME_BUNDLE)
+    || !fs.existsSync(PRELOAD)
+    || fs.statSync(PRELOAD_SRC).mtimeMs > fs.statSync(PRELOAD).mtimeMs;
+  if (distIsStale) {
     cp.execFileSync('node', [path.join(REPO, 'scripts', 'build-proxy.mjs')], { stdio: 'inherit' });
   }
 
@@ -102,6 +106,7 @@ test('renderer flow: preload chains original, boots runtime, loads builtin panel
     assert.strictEqual(window.__fixturePreloadRan, true, 'original preload chained');
     assert.ok(window.ggbExtendHost, 'bridge exposed');
     assert.strictEqual(typeof window.ggbExtendHost.readPluginSource, 'function', 'bridge has readPluginSource');
+    assert.strictEqual(typeof window.ggbExtendHost.netFetch, 'function', 'bridge has netFetch');
 
     assert.ok(window.__ggbExtendRuntime__, 'runtime booted (window.__ggbExtendRuntime__)');
     const list = window.__ggbExtendRuntime__.listPlugins();

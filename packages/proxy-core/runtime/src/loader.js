@@ -81,11 +81,13 @@ export class PluginLoader {
    * @param {function} deps.makeStorage (pluginId) => PluginStorage
    * @param {function} [deps.onLog]
    */
-  constructor({ sdk, core, host, makeStorage, onLog }) {
+  constructor({ sdk, core, host, makeStorage, makeNet, onLog }) {
     this.sdk = sdk;
     this.core = core;
     this.host = host;
     this.makeStorage = makeStorage || (() => new sdk.MemoryStorage());
+    // makeNet(pluginId, manifest) → { fetch(url, opts) } | null
+    this.makeNet = makeNet || (() => null);
     this.onLog = onLog || (() => {});
     /** @type {Map<string, object>} id → { manifest, instance, ctx, enabled, builtin, error } */
     this.loaded = new Map();
@@ -105,12 +107,24 @@ export class PluginLoader {
     const record = { manifest, instance: null, ctx: null, enabled: !!d.enabled, builtin: !!d.builtin, error: null };
     try {
       const def = evaluatePlugin(d.source, sdk);
+      const docks = [];
+      const ui = {
+        mountInAlgebraView: (uiOpts = {}) => {
+          const dock = sdk.mountInAlgebraView(uiOpts);
+          docks.push(dock);
+          return dock;
+        },
+      };
       const ctx = new sdk.PluginContext({
         core: this.core,
         manifest,
         storage: this.makeStorage(manifest.id),
         host: this.host,
+        net: this.makeNet(manifest.id, manifest),
+        ui,
       });
+      // auto-clean any docked panels when the plugin is torn down
+      ctx.registerDisposable(() => { for (const d of docks) { try { d.destroy(); } catch { /* ignore */ } } });
       const instance = instantiatePlugin(def, ctx);
       record.instance = instance;
       record.ctx = ctx;

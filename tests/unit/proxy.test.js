@@ -17,6 +17,7 @@ const assert = require('node:assert');
 const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs');
+const http = require('node:http');
 
 const PROXY_MAIN = path.join(__dirname, '..', '..', 'packages', 'proxy-core', 'src', 'main.js');
 
@@ -187,6 +188,8 @@ test('registerIpc creates plugin dir + state file and registers channels', () =>
     'ggb-extend:open-plugin-folder',
     'ggb-extend:get-settings',
     'ggb-extend:set-settings',
+    'ggb-extend:net-fetch',
+    'ggb-extend:net-approve',
     'ggb-extend:read-plugin-source',
   ]) {
     assert.ok(electron.__handlers.has(ch), 'channel registered: ' + ch);
@@ -243,6 +246,68 @@ test('settings round-trip through IPC', async () => {
   const got = await electron.__invoke('ggb-extend:get-settings');
   assert.strictEqual(got.settings.opacity, 0.7);
   assert.strictEqual(got.settings.theme, 'midnight');
+});
+
+test('netFetch enforces https + declared host + user approval + SSRF block', async () => {
+  const electron = makeElectronStub(freshUserData());
+  const proxy = loadProxyFresh(electron);
+
+  const declaredHosts = new Set(['api.openai.com']);
+  const approved = { 'api.openai.com': true };
+  const ctx = { pluginId: 'ai', declaredHosts, isApproved: (h) => approved[h] === true };
+
+  // non-https → rejected
+  let r = await proxy.netFetch({ url: 'http://api.openai.com/v1/x' }, ctx);
+  assert.strictEqual(r.ok, false); assert.match(r.error, /https/);
+
+  // host NOT declared in the manifest → rejected (ENOTDECLARED)
+  r = await proxy.netFetch({ url: 'https://evil.example.com/x' }, ctx);
+  assert.strictEqual(r.code, 'ENOTDECLARED');
+
+  // declared but NOT yet approved → needsApproval
+  r = await proxy.netFetch({ url: 'https://api.openai.com/v1/x' }, { pluginId: 'ai', declaredHosts, isApproved: () => false });
+  assert.strictEqual(r.needsApproval, true);
+  assert.strictEqual(r.host, 'api.openai.com');
+
+  // declared + approved but a bad method → rejected
+  r = await proxy.netFetch({ url: 'https://api.openai.com/v1/x', method: 'TRACE' }, ctx);
+  assert.strictEqual(r.ok, false); assert.match(r.error, /Method not allowed/);
+});
+
+test('isBlockedHost blocks loopback/private/metadata, allows public', () => {
+  const proxy = loadProxyFresh(makeElectronStub(freshUserData()));
+  for (const h of ['localhost', '127.0.0.1', '::1', '169.254.169.254', '10.1.2.3', '192.168.0.5', '172.16.9.9', 'metadata.google.internal']) {
+    assert.strictEqual(proxy.isBlockedHost(h), true, `should block ${h}`);
+  }
+  for (const h of ['api.openai.com', 'example.com', '8.8.8.8']) {
+    assert.strictEqual(proxy.isBlockedHost(h), false, `should allow ${h}`);
+  }
+});
+
+test('net-fetch IPC path: reads manifest perms + approvals, and SSRF still wins', async () => {
+  const electron = makeElectronStub(freshUserData());
+  const proxy = loadProxyFresh(electron);
+  const p = proxy.registerIpc(electron);
+
+  // a plugin that declares a host, plus user approval persisted via the IPC
+  fs.mkdirSync(path.join(p.root, 'ai'), { recursive: true });
+  fs.writeFileSync(path.join(p.root, 'ai', 'manifest.json'),
+    JSON.stringify({ id: 'ai', name: 'AI', version: '1.0.0', main: 'index.js', permissions: { network: ['127.0.0.1'] } }));
+  fs.writeFileSync(path.join(p.root, 'ai', 'index.js'), 'export default {}');
+
+  // undeclared host → ENOTDECLARED (manifest perms read correctly through IPC)
+  let res = await electron.__invoke('ggb-extend:net-fetch', { pluginId: 'ai', url: 'https://api.openai.com/x' });
+  assert.strictEqual(res.code, 'ENOTDECLARED');
+
+  // declared but not approved → needsApproval
+  res = await electron.__invoke('ggb-extend:net-fetch', { pluginId: 'ai', url: 'https://127.0.0.1/x' });
+  assert.strictEqual(res.needsApproval, true);
+
+  // approve it (persists to state.json) → now SSRF guard blocks loopback
+  await electron.__invoke('ggb-extend:net-approve', { pluginId: 'ai', host: '127.0.0.1', allow: true });
+  res = await electron.__invoke('ggb-extend:net-fetch', { pluginId: 'ai', url: 'https://127.0.0.1/x' });
+  assert.strictEqual(res.ok, false);
+  assert.match(res.error, /Blocked host/);
 });
 
 test('read-plugin-source returns code for the plugin entry', async () => {

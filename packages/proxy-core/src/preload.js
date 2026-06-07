@@ -36,6 +36,8 @@ const api = {
   openPluginFolder: () => ipcRenderer.invoke('ggb-extend:open-plugin-folder'),
   getSettings: () => ipcRenderer.invoke('ggb-extend:get-settings'),
   setSettings: (s) => ipcRenderer.invoke('ggb-extend:set-settings', s),
+  netFetch: (request) => ipcRenderer.invoke('ggb-extend:net-fetch', request),
+  netApprove: (pluginId, host, allow) => ipcRenderer.invoke('ggb-extend:net-approve', { pluginId, host, allow }),
   // The runtime (main world) calls these to load plugin code & persist toggles.
   readPluginSource: async (id) => {
     const r = await ipcRenderer.invoke('ggb-extend:read-plugin-source', { id });

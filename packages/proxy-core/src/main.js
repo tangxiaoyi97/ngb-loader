@@ -131,6 +131,128 @@ function writeState(stateFile, state) {
   }
 }
 
+const ALLOWED_METHODS = new Set(['GET', 'POST', 'PUT', 'DELETE', 'PATCH']);
+
+/** Normalize a hostname (strip brackets, lowercase). */
+function normHost(h) { return String(h || '').replace(/^\[|\]$/g, '').toLowerCase(); }
+
+/**
+ * SSRF guard: reject loopback, private, link-local, and cloud-metadata targets
+ * even over https, so a plugin can't reach the local machine or an internal
+ * network. We only allow public hostnames; raw private/reserved IPs are blocked.
+ */
+function isBlockedHost(hostname) {
+  const h = normHost(hostname);
+  if (!h) return true;
+  if (h === 'localhost' || h.endsWith('.localhost')) return true;
+  if (h === '169.254.169.254' || h === 'metadata.google.internal') return true; // cloud metadata
+  // IPv6 loopback / link-local / unique-local
+  if (h === '::1' || h.startsWith('fe80:') || h.startsWith('fc') || h.startsWith('fd')) return true;
+  // IPv4 literals in private/reserved ranges
+  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (m) {
+    const [a, b] = [Number(m[1]), Number(m[2])];
+    if (a === 10) return true;                          // 10.0.0.0/8
+    if (a === 127) return true;                         // loopback
+    if (a === 0) return true;                           // 0.0.0.0/8
+    if (a === 169 && b === 254) return true;            // link-local
+    if (a === 172 && b >= 16 && b <= 31) return true;   // 172.16.0.0/12
+    if (a === 192 && b === 168) return true;            // 192.168.0.0/16
+    if (a >= 224) return true;                          // multicast/reserved
+  }
+  return false;
+}
+
+/**
+ * Perform a guarded HTTP request on behalf of a plugin. Security checks (in
+ * order): https only → host allowed by the plugin's manifest → host approved by
+ * the user → not an SSRF target. The caller (IPC handler) supplies the plugin's
+ * declared hosts and the user-approval check.
+ * @param {object} request { url, method, headers, body, timeoutMs }
+ * @param {object} ctx { declaredHosts:Set<string>, isApproved:(host)=>boolean, pluginId }
+ */
+function netFetch(request = {}, ctx = {}) {
+  return new Promise((resolve) => {
+    let target;
+    try { target = new URL(String(request.url || '')); }
+    catch { resolve({ ok: false, status: 0, error: 'Invalid request URL' }); return; }
+
+    if (target.protocol !== 'https:') {
+      resolve({ ok: false, status: 0, error: 'Only https:// URLs are allowed' }); return;
+    }
+    const host = normHost(target.hostname);
+    const declared = ctx.declaredHosts || new Set();
+    if (!declared.has(host)) {
+      resolve({ ok: false, status: 0, code: 'ENOTDECLARED', error: `Plugin "${ctx.pluginId}" did not declare network access to ${host} (add it to manifest permissions.network)` });
+      return;
+    }
+    if (typeof ctx.isApproved === 'function' && !ctx.isApproved(host)) {
+      resolve({ ok: false, status: 0, code: 'ENEEDSAPPROVAL', needsApproval: true, host, pluginId: ctx.pluginId, error: `User has not approved ${host} for "${ctx.pluginId}"` });
+      return;
+    }
+    if (isBlockedHost(host)) {
+      resolve({ ok: false, status: 0, error: `Blocked host (private/loopback/metadata): ${host}` }); return;
+    }
+
+    const method = String(request.method || 'GET').toUpperCase();
+    if (!ALLOWED_METHODS.has(method)) {
+      resolve({ ok: false, status: 0, error: `Method not allowed: ${method}` }); return;
+    }
+
+    let body;
+    if (request.body !== undefined && request.body !== null && method !== 'GET') {
+      body = typeof request.body === 'string' ? request.body : (() => {
+        try { return JSON.stringify(request.body); } catch { return undefined; }
+      })();
+      if (body === undefined) { resolve({ ok: false, status: 0, error: 'Body must be a string or JSON-serializable' }); return; }
+      if (Buffer.byteLength(body) > 4 * 1024 * 1024) { resolve({ ok: false, status: 0, error: 'Request body too large' }); return; }
+    }
+
+    const headers = Object.assign({}, request.headers || {});
+    for (const k of Object.keys(headers)) {
+      if (/^(host|content-length)$/i.test(k)) delete headers[k];
+    }
+    if (body !== undefined) {
+      if (!Object.keys(headers).some((k) => /^content-type$/i.test(k))) headers['Content-Type'] = 'application/json';
+      headers['Content-Length'] = Buffer.byteLength(body);
+    }
+
+    const https = require('https');
+    const req = https.request({
+      hostname: target.hostname,
+      port: target.port || undefined,
+      path: `${target.pathname}${target.search}`,
+      method,
+      headers,
+      timeout: Math.max(1000, Math.min(Number(request.timeoutMs) || 60000, 120000)),
+    }, (res) => {
+      const chunks = [];
+      let size = 0;
+      res.on('data', (chunk) => {
+        size += chunk.length;
+        if (size <= 8 * 1024 * 1024) chunks.push(chunk);
+        else req.destroy(new Error('Response body too large'));
+      });
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        let data = null;
+        try { data = text ? JSON.parse(text) : null; } catch { data = null; }
+        resolve({
+          ok: res.statusCode >= 200 && res.statusCode < 300,
+          status: res.statusCode,
+          statusText: res.statusMessage || '',
+          headers: res.headers,
+          data, text,
+        });
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('Request timed out')));
+    req.on('error', (err) => resolve({ ok: false, status: 0, error: err && err.message ? err.message : String(err) }));
+    if (body !== undefined) req.write(body);
+    req.end();
+  });
+}
+
 /**
  * Read a single plugin's manifest.json and normalize it.
  * Returns null if the directory is not a valid plugin.
@@ -153,6 +275,10 @@ function readPluginManifest(dir) {
     description: manifest.description || '',
     main: manifest.main || 'index.js',
     icon: iconToDataUri(dir, manifest.icon),
+    permissions: {
+      network: Array.isArray(manifest.permissions && manifest.permissions.network)
+        ? manifest.permissions.network.map((h) => String(h)) : [],
+    },
     dir,
     broken: false,
   };
@@ -250,6 +376,35 @@ function registerIpc(electron) {
     state.settings = Object.assign({}, state.settings, settings || {});
     const ok = writeState(p.stateFile, state);
     return { ok, settings: state.settings };
+  });
+
+  // Guarded network request for a plugin. The plugin must (a) declare the host
+  // in its manifest permissions.network and (b) have the user's approval for it
+  // (persisted in state.json under netApprovals[pluginId]). SSRF targets are
+  // always blocked. `request.pluginId` identifies the caller.
+  handle('ggb-extend:net-fetch', async (_evt, request = {}) => {
+    const pluginId = request.pluginId;
+    const plugin = listPlugins(p).find((x) => x.id === pluginId);
+    if (!plugin) return { ok: false, status: 0, error: 'unknown plugin' };
+    const declaredHosts = new Set((plugin.permissions && plugin.permissions.network ? plugin.permissions.network : []).map(normHost));
+    const state = readState(p.stateFile);
+    const approvals = (state.netApprovals && state.netApprovals[pluginId]) || {};
+    return netFetch(request, {
+      pluginId,
+      declaredHosts,
+      isApproved: (host) => approvals[host] === true,
+    });
+  });
+
+  // Record the user's decision to allow a plugin to reach a host (persisted).
+  handle('ggb-extend:net-approve', async (_evt, { pluginId, host, allow }) => {
+    if (!pluginId || !host) return { ok: false, error: 'pluginId and host required' };
+    const state = readState(p.stateFile);
+    if (!state.netApprovals) state.netApprovals = {};
+    if (!state.netApprovals[pluginId]) state.netApprovals[pluginId] = {};
+    state.netApprovals[pluginId][normHost(host)] = !!allow;
+    writeState(p.stateFile, state);
+    return { ok: true };
   });
 
   // Read a plugin's source bundle so the renderer can evaluate it in-page.
@@ -451,6 +606,8 @@ module.exports = {
   writeState,
   readPluginManifest,
   listPlugins,
+  netFetch,
+  isBlockedHost,
   registerIpc,
   patchBrowserWindow,
   applyHooks,

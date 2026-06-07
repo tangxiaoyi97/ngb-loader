@@ -103,7 +103,38 @@ declare module '@neogebra/sdk' {
     description?: string;
     icon?: string | null;
     engines?: { ngbLoader?: string };
-    permissions?: string[];
+    /** Declared capabilities. `network` lists hostnames the plugin may reach via
+     *  ctx.net.fetch (the user must still approve each on first use). */
+    permissions?: { network?: string[] };
+  }
+
+  /** A guarded network response (from ctx.net.fetch). */
+  export interface NetResponse<T = any> {
+    ok: boolean;
+    status: number;
+    statusText?: string;
+    headers?: Record<string, string | string[]>;
+    /** Parsed JSON body when the response was JSON, else null. */
+    data?: T | null;
+    /** Raw response text. */
+    text?: string;
+    /** Present on failures. */
+    error?: string;
+    code?: string;
+  }
+
+  export interface NetFetchOptions {
+    method?: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
+    headers?: Record<string, string>;
+    /** String, or any JSON-serializable value (sent as JSON). */
+    body?: any;
+    timeoutMs?: number;
+  }
+
+  /** Scoped network access. Only hosts declared in the manifest's
+   *  permissions.network AND approved by the user can be reached. */
+  export interface PluginNet {
+    fetch<T = any>(url: string, opts?: NetFetchOptions): Promise<NetResponse<T>>;
   }
 
   /** Scoped key/value storage handed to each plugin. */
@@ -137,18 +168,55 @@ declare module '@neogebra/sdk' {
   }
 
   /** Everything a plugin gets without touching globals. */
+  export interface DockMountOptions {
+    id?: string;
+    collapsible?: boolean;
+    collapsed?: boolean;
+    title?: string;
+    onDockChange?: (docked: boolean) => void;
+  }
+
+  /** Handle to a panel mounted into GeoGebra's UI. Render into `element`. */
+  export interface DockController {
+    /** The element to render your UI into. */
+    element: HTMLElement;
+    host: HTMLElement;
+    shadow: ShadowRoot;
+    /** True when actually docked inside the algebra view (vs floating fallback). */
+    isDocked(): boolean;
+    collapsed(): boolean;
+    setCollapsed(v: boolean): void;
+    reattach(): void;
+    destroy(): void;
+  }
+
+  export interface PluginUi {
+    /** Mount a panel into GeoGebra's algebra view (left column, below the tree),
+     *  falling back to a floating panel if the algebra view isn't available. */
+    mountInAlgebraView(opts?: DockMountOptions): DockController;
+  }
+
+  /** Mount a panel into GeoGebra's algebra view. Prefer ctx.ui.mountInAlgebraView. */
+  export function mountInAlgebraView(opts?: DockMountOptions): DockController;
+
   export class PluginContext {
     constructor(opts: {
       core: GgbCore;
       manifest: PluginManifest;
       storage?: PluginStorage;
       host?: HostBridge | null;
+      net?: PluginNet | null;
+      ui?: PluginUi | null;
     });
     readonly core: GgbCore;
     readonly manifest: PluginManifest;
     readonly id: string;
     readonly storage: PluginStorage;
     readonly host: HostBridge | null;
+    /** Guarded network access (manifest-declared + user-approved hosts). */
+    readonly net: PluginNet | null;
+    /** UI mounting helpers (mount a panel into GeoGebra's UI). */
+    readonly ui: PluginUi | null;
     readonly log: PluginLogger;
     /** Register cleanup run automatically on disable/unload. */
     registerDisposable(fn: () => void): () => void;

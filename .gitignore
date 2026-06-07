@@ -35,3 +35,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.tmp
+
+# In development
+geogebra-ai-assistant/

@@ -119,7 +119,7 @@ That's a complete, working plugin.
 | `description` | no | string | panel detail, manager list | One or two sentences about the plugin. |
 | `icon` | no | string | panel list + detail, manager list | Path to an icon image relative to the plugin folder (e.g. `"icon.png"`). See below. |
 | `engines.ngbLoader` | no | string | — | Semver range of the framework you target, e.g. `">=1.0.0"`. |
-| `permissions` | no | string[] | — | Reserved for a future capability system. |
+| `permissions` | no | object | — | Capability declarations. Currently `permissions.network: string[]` — hostnames the plugin may reach via `ctx.net.fetch`. See §7. |
 
 Minimum valid manifest:
 
@@ -263,6 +263,7 @@ reaching for globals:
 | `ctx.manifest` | object | Your normalized manifest. |
 | `ctx.id` | string | Your plugin id. |
 | `ctx.storage` | object | Scoped key/value storage: `get(key, fallback?)`, `set(key, value)`, `delete(key)`, `keys()`. |
+| `ctx.net` | object | Guarded network access: `fetch(url, opts)`. Only manifest-declared + user-approved hosts. See §7. |
 | `ctx.log` | object | Scoped logger: `info / warn / error`. Output is tagged `[plugin:<id>]`. |
 | `ctx.registerDisposable(fn)` | method | Register a cleanup function; it runs automatically on disable/unload. |
 
@@ -376,6 +377,107 @@ The SDK also exports a few pieces you usually don't need directly:
 | `validateManifest(manifest)` | Normalizes/validates a manifest object (the loader uses it). |
 | `runLifecycle(instance, phase, ctx)` | Drives a lifecycle transition (framework-internal). |
 | `VERSION` | The SDK version string. |
+
+### 6.6 Network access (`ctx.net`)
+
+Plugins run inside GeoGebra's page, where the Content-Security-Policy blocks
+cross-origin requests — so a normal `fetch()` to an API will fail. Neogebra gives
+you a **guarded** network channel instead: `ctx.net.fetch(url, opts)`. It runs in
+the host process (no CSP), but only after passing a strict policy:
+
+1. **You declare the hostnames** in your manifest under `permissions.network`.
+2. **The user approves** each host on first use (a dialog appears; the choice is
+   remembered).
+3. **https only**, and private/loopback/cloud-metadata addresses are always
+   blocked (no SSRF).
+
+A request to a host you didn't declare, or that the user blocked, fails — it
+never silently reaches the network.
+
+Manifest:
+
+```json
+{
+  "id": "ai-chat", "name": "AI Chat", "version": "1.0.0", "main": "src/index.js",
+  "permissions": { "network": ["api.openai.com"] }
+}
+```
+
+`ctx.net.fetch(url, opts)`:
+
+| Option | Type | Default |
+|--------|------|---------|
+| `method` | `'GET'｜'POST'｜'PUT'｜'DELETE'｜'PATCH'` | `'GET'` |
+| `headers` | object | — |
+| `body` | string or JSON-serializable value (sent as JSON) | — |
+| `timeoutMs` | number (1000–120000) | 60000 |
+
+Returns `{ ok, status, statusText, headers, data, text, error }` — `data` is the
+parsed JSON body (or `null`), `text` the raw body.
+
+Example — an AI chat plugin (the plugin manages its own API key via `ctx.storage`,
+the framework never sees it):
+
+```js
+import { Plugin } from '@neogebra/sdk';
+
+export default class AiChat extends Plugin {
+  async ask(ctx, prompt) {
+    const key = ctx.storage.get('apiKey', '');         // user set this in your settings UI
+    if (!key) { ctx.log.warn('No API key set'); return; }
+
+    const res = await ctx.net.fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}` },     // your key, your call
+      body: { model: 'gpt-4o-mini', messages: [{ role: 'user', content: prompt }] },
+    });
+
+    if (!res.ok) { ctx.log.error('AI request failed:', res.error || res.status); return; }
+    return res.data.choices?.[0]?.message?.content;
+  }
+}
+```
+
+The first time this plugin calls `api.openai.com`, the user sees an
+**“Allow network access?”** dialog naming your plugin and the host. If they allow,
+it's remembered; if they block, the call returns `{ ok: false }`.
+
+> **Keys & secrets stay with your plugin.** Neogebra deliberately does not manage
+> API keys — store them with `ctx.storage` (set via your own settings UI) and put
+> them in the `headers` you pass to `ctx.net.fetch`.
+
+### 6.7 Docking a panel into GeoGebra (`ctx.ui`)
+
+To put a panel **inside GeoGebra's UI** (rather than a floating overlay), use
+`ctx.ui.mountInAlgebraView()`. The framework finds GeoGebra's algebra view (the
+left column), appends a host below the object tree, and keeps it attached across
+GeoGebra DOM rebuilds — so you don't write fragile DOM-probing yourself. If the
+algebra view isn't available, it falls back to a floating panel automatically.
+
+```js
+async onEnable(ctx) {
+  const dock = ctx.ui.mountInAlgebraView({ title: 'My Panel', collapsed: false });
+  // Render your UI into dock.element (it lives in a Shadow DOM the framework owns).
+  const root = dock.element;
+  root.innerHTML = '<div style="padding:8px">Hello from the algebra view</div>';
+  // dock is auto-destroyed when your plugin is disabled/unloaded.
+}
+```
+
+`mountInAlgebraView(opts)` → controller:
+
+| Member | Description |
+|--------|-------------|
+| `element` | The element to render into (inside a framework-owned Shadow DOM). |
+| `isDocked()` | `true` when docked inside the algebra view; `false` if floating. |
+| `collapsed()` / `setCollapsed(b)` | Read/toggle the collapsed state. |
+| `reattach()` | Force a re-attach (rarely needed). |
+| `destroy()` | Remove it (also runs automatically on disable/unload). |
+
+Options: `{ title?, collapsed?, collapsible?, onDockChange?(docked) }`.
+
+Match GeoGebra's theme with `window.__ggbExtendTheme__()` (`'light'`/`'dark'`).
+Keep your own styles inside the Shadow DOM so they don't leak into GeoGebra.
 
 ---
 

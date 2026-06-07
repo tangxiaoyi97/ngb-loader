@@ -7,13 +7,20 @@ export class PluginContext {
    * @param {object} opts.manifest
    * @param {object} [opts.storage]  scoped key/value storage (sync get/set)
    * @param {object} [opts.host]     the preload bridge (window.ggbExtendHost)
+   * @param {object} [opts.net]      scoped network access: { fetch(url, opts) }
+   * @param {object} [opts.ui]       UI mounting helpers: { mountInAlgebraView(opts) }
    */
-  constructor({ core, manifest, storage, host }) {
+  constructor({ core, manifest, storage, host, net, ui }) {
     this.core = core;
     this.manifest = manifest;
     this.id = manifest.id;
     this.storage = storage || new MemoryStorage();
     this.host = host || null;
+    /** UI mounting helpers (mount a panel into GeoGebra's UI). */
+    this.ui = ui || null;
+    /** Guarded network access (only hosts declared in manifest.permissions.network
+     *  and approved by the user). Undefined when no host bridge is present. */
+    this.net = net || null;
     /** @type {Array<() => void>} */
     this._disposables = [];
     this.log = makeLogger(manifest.id);

@@ -6,8 +6,7 @@ import { PluginLoader } from './loader.js';
 // esbuild's `text` loader turns these into strings at build time.
 import panelManifest from '../../builtin-plugins/panel-manager/manifest.json';
 import panelSourceBundled from '../../builtin-plugins/panel-manager/dist/index.bundle.js';
-// The panel icon, inlined as a data: URI at build time (esbuild 'dataurl'
-// loader). The relative "icon.png" in the manifest can't be loaded from the
+// The panel icon, inlined as a data: URI at build time (esbuild 'dataurl' loader). The relative "icon.png" in the manifest can't be loaded from the
 // GeoGebra page, so we override it with this.
 import panelIconDataUri from '../../builtin-plugins/panel-manager/icon.png';
 
@@ -45,8 +44,28 @@ async function boot(opts = {}) {
     return mem; // v0.2: in-memory; persistence can be layered via host later
   };
 
+  // 2b) scoped network access. Each plugin gets ctx.net.fetch bound to its own id.
+  // The host enforces the security policy (manifest-declared host + user approval
+  // + SSRF block); here we just surface a clean API and, on first use of a host,
+  // ask the user to approve, then retry.
+  const makeNet = (pluginId, manifest) => {
+    if (!host || typeof host.netFetch !== 'function') return null;
+    const fetch = async (url, opts = {}) => {
+      const request = { pluginId, url, method: opts.method, headers: opts.headers, body: opts.body, timeoutMs: opts.timeoutMs };
+      let res = await host.netFetch(request);
+      if (res && res.needsApproval && typeof host.netApprove === 'function') {
+        const allow = await confirmNetAccess(manifest, res.host);
+        await host.netApprove(pluginId, res.host, allow);
+        if (!allow) return { ok: false, status: 0, error: `User denied network access to ${res.host}` };
+        res = await host.netFetch(request); // retry once after approval
+      }
+      return res;
+    };
+    return { fetch };
+  };
+
   const loader = new PluginLoader({
-    sdk, core, host, makeStorage,
+    sdk, core, host, makeStorage, makeNet,
     onLog: (e) => log(host, e.level, e.msg),
   });
 
@@ -97,6 +116,53 @@ async function boot(opts = {}) {
   window.__ggbExtendReady__ = true;
   log(host, 'info', `runtime ready — ${loader.list().length} plugin(s) loaded`);
   return runtime;
+}
+
+/**
+ * Ask the user to approve a plugin's network access to a host. Theme-aware modal
+ * in a closed Shadow DOM. Resolves true (Allow) / false (Block).
+ */
+function confirmNetAccess(manifest, host) {
+  if (typeof document === 'undefined') return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const theme = (typeof window !== 'undefined' && typeof window.__ggbExtendTheme__ === 'function')
+      ? window.__ggbExtendTheme__() : 'light';
+    const dark = theme === 'dark';
+    const bg = dark ? '#2b2d31' : '#fff';
+    const fg = dark ? '#ececf0' : '#1d1d1f';
+    const sub = dark ? '#b7bcc7' : '#5b616e';
+    const border = dark ? 'rgba(255,255,255,.12)' : '#e3e6ee';
+
+    const hostEl = document.createElement('div');
+    hostEl.style.cssText = 'all: initial; position: fixed; inset: 0; z-index: 2147483647;';
+    document.documentElement.appendChild(hostEl);
+    const shadow = hostEl.attachShadow({ mode: 'closed' });
+    const done = (v) => { hostEl.remove(); resolve(v); };
+
+    const wrap = document.createElement('div');
+    wrap.style.cssText = `position:fixed;inset:0;background:rgba(20,22,30,.4);display:grid;place-items:center;font-family:'Roboto',-apple-system,sans-serif`;
+    wrap.innerHTML = `
+      <div style="background:${bg};color:${fg};border:1px solid ${border};border-radius:16px;padding:22px;width:min(420px,90vw);box-shadow:0 16px 48px rgba(0,0,0,.35)">
+        <h3 style="margin:0 0 10px;font-size:16px;font-weight:500">Allow network access?</h3>
+        <p style="margin:0 0 6px;font-size:13px;line-height:1.55;color:${sub}">
+          The plugin <b style="color:${fg}">${escapeHtml(manifest.name || manifest.id)}</b> wants to connect to:
+        </p>
+        <div style="font-size:13px;font-weight:500;background:${dark ? 'rgba(255,255,255,.06)' : '#f4f5f9'};border:1px solid ${border};border-radius:8px;padding:8px 11px;margin:0 0 12px;word-break:break-all">${escapeHtml(host)}</div>
+        <p style="margin:0 0 16px;font-size:11.5px;color:${sub}">Only allow hosts you trust. The plugin can send data to this host.</p>
+        <div style="display:flex;justify-content:flex-end;gap:8px">
+          <button id="nx-deny" style="appearance:none;cursor:pointer;font-size:13px;padding:8px 14px;border-radius:999px;border:1px solid ${border};background:${bg};color:${fg};font-family:inherit">Block</button>
+          <button id="nx-allow" style="appearance:none;cursor:pointer;font-size:13px;padding:8px 14px;border-radius:999px;border:none;background:#6557d3;color:#fff;font-family:inherit">Allow</button>
+        </div>
+      </div>`;
+    shadow.appendChild(wrap);
+    wrap.querySelector('#nx-allow').addEventListener('click', () => done(true));
+    wrap.querySelector('#nx-deny').addEventListener('click', () => done(false));
+    wrap.addEventListener('click', (e) => { if (e.target === wrap) done(false); });
+  });
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 // Expose boot for the preload to call.

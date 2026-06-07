@@ -1,6 +1,7 @@
 // @neogebra/sdk — public entry point for plugin authors.
 export { GgbCore, whenAppletReady } from './ggb-core.js';
 export { Emitter } from './emitter.js';
+export { mountInAlgebraView } from './algebra-dock.js';
 export {
   Plugin,
   PluginContext,
