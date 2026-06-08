@@ -36,5 +36,6 @@ Thumbs.db
 .vscode/
 *.tmp
 
-# In development (AI assistant plugin — kept out of the repo)
+# In development (AI assistant plugin and container playground)
 examples/geogebra-ai-assistant/
+examples/container-playground/
