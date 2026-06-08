@@ -37,6 +37,12 @@
   async function openSettings(p) {
     if (!p || !p.hasSettings) return;
     try { await runtime.openSettings(p.id); } catch (e) { /* ignore */ }
+    // Issue B: hide the panel so only the plugin's settings UI remains.
+    // Issue C: reset navigation first, so re-opening the panel lands on the
+    // plugin list (not stuck on the detail page we just left).
+    selectedId = null;
+    view = 'plugins';
+    requestClose();
   }
 
   function openFolder() { try { runtime.openPluginFolder && runtime.openPluginFolder(); } catch (e) {} }

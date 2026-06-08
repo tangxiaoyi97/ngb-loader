@@ -108,11 +108,20 @@ export class PluginLoader {
     try {
       const def = evaluatePlugin(d.source, sdk);
       const docks = [];
+      const rows = [];
       const ui = {
         mountInAlgebraView: (uiOpts = {}) => {
           const dock = sdk.mountInAlgebraView(uiOpts);
           docks.push(dock);
           return dock;
+        },
+        // Create a container that lives inside GeoGebra's algebra list as a
+        // native object row (framework hijacks a real GeoGebra object row).
+        createNativeRow: (rowOpts = {}) => {
+          const applet = this.core && this.core.raw ? this.core.raw : undefined;
+          const rowHandle = sdk.createNativeRow(applet ? { ...rowOpts, applet } : rowOpts);
+          rows.push(rowHandle);
+          return rowHandle;
         },
       };
       const ctx = new sdk.PluginContext({
@@ -123,8 +132,9 @@ export class PluginLoader {
         net: this.makeNet(manifest.id, manifest),
         ui,
       });
-      // auto-clean any docked panels when the plugin is torn down
+      // auto-clean any docked panels / native rows when the plugin is torn down
       ctx.registerDisposable(() => { for (const d of docks) { try { d.destroy(); } catch { /* ignore */ } } });
+      ctx.registerDisposable(() => { for (const r of rows) { try { r.destroy(); } catch { /* ignore */ } } });
       const instance = instantiatePlugin(def, ctx);
       record.instance = instance;
       record.ctx = ctx;

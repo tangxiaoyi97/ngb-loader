@@ -2,6 +2,7 @@
 export { GgbCore, whenAppletReady } from './ggb-core.js';
 export { Emitter } from './emitter.js';
 export { mountInAlgebraView } from './algebra-dock.js';
+export { createNativeRow } from './algebra-row.js';
 export {
   Plugin,
   PluginContext,

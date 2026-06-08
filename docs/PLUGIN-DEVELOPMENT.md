@@ -479,6 +479,52 @@ Options: `{ title?, collapsed?, collapsible?, onDockChange?(docked) }`.
 Match GeoGebra's theme with `window.__ggbExtendTheme__()` (`'light'`/`'dark'`).
 Keep your own styles inside the Shadow DOM so they don't leak into GeoGebra.
 
+### 6.8 A native row in the algebra list (`ctx.ui.createNativeRow`)
+
+For UI that should look like it belongs **in GeoGebra's algebra list** (as if the
+user added an object), use `ctx.ui.createNativeRow()`. The framework asks
+GeoGebra to create a real object so GeoGebra lays out a native row, then takes
+over that row's content area and hands it to you. Because the object is real,
+GeoGebra's own delete/undo keep working; the framework reroutes the object's
+removal back to your plugin so cleanup stays in sync.
+
+```js
+async onEnable(ctx) {
+  const row = ctx.ui.createNativeRow({
+    name: 'myPanel',                 // optional; a unique name is generated otherwise
+    onAttached: () => render(),      // fires when the row is ready (GeoGebra renders async)
+    onRemoved:  () => { /* the user deleted the object — drop your references */ },
+  });
+  function render() {
+    if (!row.element) return;        // not attached yet
+    row.element.innerHTML = '<div style="padding:8px">Hello from the algebra list</div>';
+  }
+  render();
+  // row is auto-destroyed (and its helper object deleted) on disable/unload.
+}
+```
+
+`createNativeRow(opts)` → controller:
+
+| Member | Description |
+|--------|-------------|
+| `kind` | `'row'` — lets you adapt styling vs. a docked panel. |
+| `element` | The element to render into (a framework-owned Shadow DOM); `null` until attached. |
+| `objectName` | The name of the backing GeoGebra object the framework created. |
+| `isAlive()` | `true` while the row is hijacked and in the DOM. |
+| `reattach()` | Force a re-hijack (rarely needed; done automatically on full tree rebuilds). |
+| `destroy()` | Remove the container and delete the backing object (auto on disable/unload). |
+
+Options: `{ name?, onAttached?(), onRemoved?() }`.
+
+Notes:
+- The row sizes to its content; bound it (e.g. `max-height` + internal scroll) so
+  it doesn't grow without limit.
+- Don't reuse the backing object for math — it exists to anchor your row. Create
+  separate objects via `ctx.core` for actual geometry.
+- `createNativeRow` (fused into the list) and `mountInAlgebraView` (docked/floating
+  panel) are independent; pick whichever fits, or try the row first and fall back.
+
 ---
 
 ## 7. A complete example plugin
