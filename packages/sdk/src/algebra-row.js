@@ -37,6 +37,61 @@ function findAlgebraView() {
   return document.querySelector('.algebraView') || document.querySelector('.gwt-Tree.algebraView') || null;
 }
 
+const DEFAULT_ROW_HEIGHT = 40; // px fallback ≈ a GeoGebra Classic 6 object row
+
+// Measure a real native row so our container matches the host's row height
+// exactly. Prefers a normal object row; falls back to the always-present
+// "Input…" row (.avInputItem); then to a constant.
+function nativeRowHeight(av) {
+  try {
+    const root = av || findAlgebraView();
+    if (root) {
+      // 1) a normal object row (not ours, not the input row)
+      for (const item of root.querySelectorAll('.avItem')) {
+        if (item.hasAttribute('data-ngb-row')) continue;
+        if (item.querySelector('.avInputItem') || item.closest('.avInputItem')) continue;
+        const h = Math.round(item.getBoundingClientRect().height);
+        if (h >= 24 && h <= 80) return h;
+      }
+      // 2) the "Input…" row is always there and is one native row tall
+      const input = root.querySelector('.avInputItem') || document.querySelector('.avInputItem');
+      if (input) {
+        const h = Math.round(input.getBoundingClientRect().height);
+        if (h >= 24 && h <= 80) return h;
+      }
+    }
+  } catch { /* ignore */ }
+  return DEFAULT_ROW_HEIGHT;
+}
+
+// Read GeoGebra's own theme so plugins can match it (and follow theme changes).
+// GeoGebra exposes a small set of CSS custom properties on :root; we also sample
+// computed text color/font from the live algebra view as sensible fallbacks.
+// Returns a flat object of tokens; safe to call any time (defaults if headless).
+export function readGgbTheme() {
+  const fallback = {
+    primary: '#6557D2', primaryVariant: '#F3F0FF', dark: '#5145A8',
+    light: '#F3F0FF', selection: 'rgba(101,87,210,0.2)',
+    text: 'rgb(28,28,31)', fontFamily: 'geogebra-sans-serif, "Helvetica Neue", Helvetica, Arial, sans-serif',
+  };
+  if (typeof document === 'undefined' || typeof getComputedStyle === 'undefined') return fallback;
+  try {
+    const root = getComputedStyle(document.documentElement);
+    const v = (name, def) => { const x = root.getPropertyValue(name).trim(); return x || def; };
+    const av = findAlgebraView();
+    const avCs = av ? getComputedStyle(av) : null;
+    return {
+      primary: v('--ggb-primary-color', fallback.primary),
+      primaryVariant: v('--ggb-primary-variant-color', fallback.primaryVariant),
+      dark: v('--ggb-dark-color', fallback.dark),
+      light: v('--ggb-light-color', fallback.light),
+      selection: v('--ggb-selection-color', fallback.selection),
+      text: (avCs && avCs.color) || fallback.text,
+      fontFamily: (avCs && avCs.fontFamily) || fallback.fontFamily,
+    };
+  } catch { return fallback; }
+}
+
 // Walk up from a node to the enclosing `.avItem` row (the unit GeoGebra lays out).
 function closestAvItem(node, stopAt) {
   let p = node;
@@ -87,6 +142,10 @@ export function createNativeRow(opts = {}) {
   }
 
   const objectName = opts.name || uniqueObjectName();
+  // 'override' = clear the whole content area, full takeover (default).
+  // 'hybrid'   = keep the native row chrome (marble dot + ⋯ menu); route the
+  //              marble click to opts.onMarbleClick and fill only the text area.
+  const mode = opts.mode === 'hybrid' ? 'hybrid' : 'override';
   let applet = getApplet(opts);  // may be null/not-ready now; resolved in waitForApplet()
   let row = null;            // the .avItem we hijacked
   let contentNode = null;    // the .elemText we took over
@@ -101,10 +160,11 @@ export function createNativeRow(opts = {}) {
   const appletReady = (a) => !!(a && typeof a.evalCommand === 'function');
 
   // Ask GeoGebra to create a real object so it renders a native row. We use a
-  // NUMBER (not a boolean): a boolean renders a clickable checkbox that stays
-  // interactive and toggles on click; a number is a static row with no controls,
-  // which is what we want to take over. (Verified: number rows survive clicks +
-  // redraws once hijacked.) We keep it out of the graphics view.
+  // NUMBER for BOTH modes: it's static (no checkbox) and never draws on the
+  // graphics view. (A visible object would render a marble dot, but visible
+  // objects also draw on the canvas — not what we want.) For hybrid we don't rely
+  // on a native marble at all: the empty marble slot is cleared and handed to the
+  // plugin (see hijackRow → handle.marble).
   function createObject() {
     let created = false;
     try { created = Boolean(applet.evalCommand(`${objectName}=1`)); } catch { created = false; }
@@ -135,13 +195,20 @@ export function createNativeRow(opts = {}) {
     }
   }
 
-  function buildHost() {
+  function buildHost(inline = false) {
     const h = document.createElement('div');
     h.setAttribute(CONTAINER_ATTR, objectName);
-    h.style.cssText = 'all: initial; display: block; width: 100%; box-sizing: border-box;';
+    // override: full-width block. hybrid: inline so it flows in the native text
+    // slot (alongside the absolutely-positioned marble + stylebar) without forcing
+    // its own box and re-breaking GeoGebra's layout.
+    h.style.cssText = inline
+      ? 'all: initial; display: inline-flex; align-items: center; box-sizing: border-box;'
+      : 'all: initial; display: block; width: 100%; box-sizing: border-box;';
     const sh = h.attachShadow({ mode: 'closed' });
     const content = document.createElement('div');
-    content.style.cssText = 'all: initial; display: block; width: 100%; box-sizing: border-box;';
+    content.style.cssText = inline
+      ? 'all: initial; display: inline-flex; align-items: center; box-sizing: border-box;'
+      : 'all: initial; display: block; width: 100%; box-sizing: border-box;';
     sh.appendChild(content);
     isolateEvents(h);
     return { h, sh, content };
@@ -168,38 +235,139 @@ export function createNativeRow(opts = {}) {
   }
   function toKebab(s) { return s.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`); }
 
-  // Take over the row's content area: hide GeoGebra's own bits, free the row's
-  // height so OUR content drives it, then inject our host.
+  // hybrid: turn the native (empty) marble slot into a PLUGIN-CONTROLLED area.
+  // We clear GeoGebra's marble, mount our own Shadow-DOM host there for the plugin
+  // to render into (dot, icon, status light…), isolate events so GeoGebra's
+  // show/hide never runs, and still call opts.onMarbleClick for convenience.
+  let marbleHandler = null;
+  let marbleNode = null;       // the GeoGebra .marblePanel we took over
+  let marbleHost = null;       // our host inside it
+  let marbleShadow = null;
+  function wireMarble(targetRow) {
+    const panel = targetRow.querySelector('.marblePanel');
+    if (!panel) return;
+    marbleNode = panel;
+    // The native marble is hidden (setVisible false → 0x0) which collapses the
+    // panel. Restore the panel to GeoGebra's NATIVE marble footprint (58px wide,
+    // its own `padding: 0 18px`) so our dot lands exactly where a native marble
+    // would, and the row reads identically to a native object row.
+    setStyle(panel, 'cursor', 'pointer');
+    setStyle(panel, 'display', 'flex');
+    setStyle(panel, 'alignItems', 'center');
+    setStyle(panel, 'justifyContent', 'center');
+    setStyle(panel, 'width', '58px');
+    setStyle(panel, 'minWidth', '58px');
+    setStyle(panel, 'height', '100%');
+    setStyle(panel, 'left', '0px');     // keep it pinned at the row's left edge
+    // Build (once) a host the plugin renders its marble content into.
+    if (!marbleHost) {
+      const built = buildHost(true);   // inline host with event isolation
+      marbleHost = built.h;
+      marbleShadow = built.sh;
+      marbleHost.__content = built.content;
+      marbleHost.setAttribute('data-ngb-marble', objectName);
+      // give the host a clickable footprint even before the plugin draws into it
+      marbleHost.style.cssText = 'all: initial; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; box-sizing: border-box;';
+      built.content.style.cssText = 'all: initial; display: inline-flex; align-items: center; justify-content: center; width: 100%; height: 100%; box-sizing: border-box;';
+    }
+    panel.textContent = '';            // remove GeoGebra's own (hidden) marble dot
+    panel.appendChild(marbleHost);
+    // Click routing. We must (a) keep GeoGebra from seeing ANY of these (so it
+    // doesn't select/drag the row), but (b) fire the plugin callback exactly ONCE
+    // per click. So pointerdown/mousedown are only swallowed; the callback runs on
+    // 'click' alone (otherwise a single physical click would toggle 2-3 times —
+    // the "expand then snap back" bug).
+    const swallow = (e) => { e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); };
+    marbleHandler = (e) => {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      e.stopPropagation();
+      if (typeof opts.onMarbleClick === 'function') { try { opts.onMarbleClick(e); } catch { /* ignore */ } }
+    };
+    panel.__ngbSwallow = swallow;
+    for (const t of ['pointerdown', 'mousedown']) panel.addEventListener(t, swallow, true);
+    panel.addEventListener('click', marbleHandler, true);
+  }
+
+  // Take over the row. In 'override' we clear the whole content area and control
+  // everything. In 'hybrid' we keep the native chrome (marble + ⋯ menu), route
+  // the marble click to the plugin, and only fill the text area with our content.
   function hijackRow(targetRow) {
     if (!targetRow) return false;
     const content = targetRow.querySelector('.elemText') || targetRow;
     const elem = targetRow.querySelector('.elem') || targetRow;
-    // Hide the parts GeoGebra owns so the row reads as a clean panel.
-    for (const sel of ['.marblePanel', '.checkboxPanel', '.algebraViewObjectStylebar']) {
-      const node = targetRow.querySelector(sel);
-      if (node) setStyle(node, 'display', 'none');
+
+    if (mode === 'override') {
+      // Hide everything GeoGebra owns so the row reads as a clean panel.
+      for (const sel of ['.marblePanel', '.checkboxPanel', '.algebraViewObjectStylebar']) {
+        const node = targetRow.querySelector(sel);
+        if (node) setStyle(node, 'display', 'none');
+      }
+    } else {
+      // hybrid: keep the marble + the ⋯ stylebar menu (native). Only the boolean
+      // checkbox (if any) is hidden — our backing object is a number, so usually
+      // there's none. Route the marble click to the plugin.
+      const checkbox = targetRow.querySelector('.checkboxPanel');
+      if (checkbox) setStyle(checkbox, 'display', 'none');
+      wireMarble(targetRow);
     }
+
     targetRow.setAttribute(ROW_ATTR, objectName);
-    // Free the row's parent chain from its one-line height constraints so the
-    // row grows/shrinks with our content (GeoGebra sizes rows for a single line).
-    for (const node of [targetRow, elem]) {
-      setStyle(node, 'height', 'auto');
-      setStyle(node, 'minHeight', '0');
-      setStyle(node, 'maxHeight', 'none');
-      setStyle(node, 'overflow', 'visible');
-      setStyle(node, 'alignItems', 'stretch'); // if it's a flex row, let us stretch
+
+    const rowH = nativeRowHeight(targetRow.closest('.algebraView'));
+    if (mode === 'override') {
+      // Full takeover: free the row chain so OUR content drives the height, and
+      // give the content area the whole row (no native marble/stylebar to dodge).
+      // Keep a native-matching MIN height so a short panel still reads like a real
+      // row (not shorter); taller content expands past it.
+      for (const node of [targetRow, elem]) {
+        setStyle(node, 'height', 'auto');
+        setStyle(node, 'minHeight', `${rowH}px`);
+        setStyle(node, 'maxHeight', 'none');
+        setStyle(node, 'overflow', 'visible');
+        setStyle(node, 'alignItems', 'stretch');
+        setStyle(node, 'lineHeight', 'normal');
+        setStyle(node, 'padding', '0');
+      }
+      setStyle(content, 'flex', '1');
+      setStyle(content, 'width', '100%');
+      setStyle(content, 'maxWidth', '100%');
+      setStyle(content, 'height', 'auto');
+      setStyle(content, 'minHeight', '0');
+      setStyle(content, 'maxHeight', 'none');
+      setStyle(content, 'overflow', 'visible');
+      setStyle(content, 'padding', '0');
+    } else {
+      // hybrid: we now OWN the marble (a fixed 28px panel pinned left) and the ⋯
+      // menu stays pinned right. GeoGebra's native content padding (≈68px left,
+      // reserved for its own marble) is wrong for us, so we take over the content
+      // box: indent past our marble on the left, leave room for the ⋯ menu on the
+      // right, fill the rest, and vertically center.
+      for (const node of [targetRow, elem]) {
+        setStyle(node, 'height', 'auto');
+        setStyle(node, 'minHeight', `${rowH}px`);
+        setStyle(node, 'maxHeight', 'none');
+        setStyle(node, 'overflow', 'visible');
+      }
+      setStyle(content, 'height', 'auto');
+      setStyle(content, 'minHeight', `${rowH}px`);
+      setStyle(content, 'maxHeight', 'none');
+      setStyle(content, 'overflow', 'visible');
+      setStyle(content, 'boxSizing', 'border-box');
+      setStyle(content, 'padding', '0');
+      setStyle(content, 'paddingLeft', '68px');   // match native indent (58px marble + gap)
+      setStyle(content, 'paddingRight', '40px');  // clear the native ⋯ stylebar
+      setStyle(content, 'display', 'flex');
+      setStyle(content, 'flexDirection', 'column');
+      setStyle(content, 'justifyContent', 'center');
     }
-    // Let our content area span the full row width and height.
-    setStyle(content, 'flex', '1');
-    setStyle(content, 'width', '100%');
-    setStyle(content, 'maxWidth', '100%');
-    setStyle(content, 'height', 'auto');
-    setStyle(content, 'minHeight', '0');
-    setStyle(content, 'maxHeight', 'none');
-    setStyle(content, 'overflow', 'visible');
-    setStyle(content, 'padding', '0');
-    // Clear GeoGebra's definition text and insert our host (build once, reuse).
-    if (!host) { const built = buildHost(); host = built.h; shadow = built.sh; host.__content = built.content; }
+
+    // Insert our host into the content area (build once, reuse). The CONTENT host
+    // always fills its box (block, 100% wide) in BOTH modes — `.elemText` is the
+    // box, and we want the plugin UI to fill it. (Only the separate MARBLE host is
+    // inline/small.) Earlier this was inline in hybrid, which collapsed the UI to
+    // ~11px.
+    if (!host) { const built = buildHost(false); host = built.h; shadow = built.sh; host.__content = built.content; }
     content.textContent = '';
     content.appendChild(host);
     row = targetRow;
@@ -237,6 +405,16 @@ export function createNativeRow(opts = {}) {
   function cleanupDom() {
     if (observer) { try { observer.disconnect(); } catch { /* ignore */ } observer = null; }
     if (reattachTimer) { clearTimeout(reattachTimer); reattachTimer = null; }
+    if (marbleNode) {
+      try {
+        if (marbleNode.__ngbSwallow) {
+          for (const t of ['pointerdown', 'mousedown']) marbleNode.removeEventListener(t, marbleNode.__ngbSwallow, true);
+        }
+        if (marbleHandler) marbleNode.removeEventListener('click', marbleHandler, true);
+      } catch { /* ignore */ }
+    }
+    if (marbleHost && marbleHost.parentNode) marbleHost.parentNode.removeChild(marbleHost);
+    marbleNode = null; marbleHandler = null; marbleHost = null; marbleShadow = null;
     if (host && host.parentNode) host.parentNode.removeChild(host);
   }
 
@@ -290,7 +468,10 @@ export function createNativeRow(opts = {}) {
 
   return {
     kind: 'row',
+    mode,
     get element() { return host ? host.__content : null; },
+    // hybrid only: the left marble area, a plugin-controlled slot (null in override).
+    get marble() { return marbleHost ? marbleHost.__content : null; },
     get host() { return host; },
     get shadow() { return shadow; },
     objectName,

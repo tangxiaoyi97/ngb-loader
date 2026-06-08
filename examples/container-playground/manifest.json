@@ -1,0 +1,11 @@
+{
+  "id": "container-playground",
+  "name": "Container Playground",
+  "version": "1.0.0",
+  "author": "Neogebra",
+  "description": "A developer playground for the native-row container API: spawn override / hybrid containers with custom content from the settings menu, and see ctx.ui.theme() in action. Use it to test and learn the framework's in-GeoGebra container system.",
+  "main": "src/index.js",
+  "icon": "icon.svg",
+  "engines": { "ngbLoader": ">=1.0.0" },
+  "permissions": []
+}

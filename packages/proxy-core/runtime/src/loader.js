@@ -117,12 +117,16 @@ export class PluginLoader {
         },
         // Create a container that lives inside GeoGebra's algebra list as a
         // native object row (framework hijacks a real GeoGebra object row).
+        // Accepts { mode:'override'|'hybrid', name?, onAttached?, onRemoved?,
+        // onMarbleClick? } — all forwarded to the SDK.
         createNativeRow: (rowOpts = {}) => {
           const applet = this.core && this.core.raw ? this.core.raw : undefined;
           const rowHandle = sdk.createNativeRow(applet ? { ...rowOpts, applet } : rowOpts);
           rows.push(rowHandle);
           return rowHandle;
         },
+        // GeoGebra's own theme tokens (colors/font) so plugins can match the host.
+        theme: () => (sdk.readGgbTheme ? sdk.readGgbTheme() : null),
       };
       const ctx = new sdk.PluginContext({
         core: this.core,

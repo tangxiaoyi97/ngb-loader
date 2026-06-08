@@ -11,7 +11,8 @@
     "packages/proxy-core",
     "packages/sdk",
     "packages/desktop",
-    "examples/hello-plugin"
+    "examples/hello-plugin",
+    "examples/container-playground"
   ],
   "scripts": {
     "test": "node scripts/run-tests.mjs",
@@ -21,6 +22,7 @@
     "installer": "npm --workspace @neogebra/installer run start",
     "cli": "node packages/injector-core/bin/ggb-extend.js",
     "doctor": "node scripts/doctor.mjs",
+    "dev:install": "node scripts/dev-install.mjs",
     "clean": "node scripts/clean.mjs",
     "reset-user-data": "node scripts/reset-user-data.mjs",
     "build": "npm run build:proxy",

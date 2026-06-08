@@ -1,0 +1,7 @@
+{
+  "name": "@neogebra-examples/container-playground",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Developer playground for the Neogebra native-row container API.",
+  "license": "MIT"
+}

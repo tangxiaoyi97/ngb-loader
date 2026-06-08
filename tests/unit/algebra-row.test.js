@@ -103,6 +103,66 @@ test('hijacks a native object row: takes over .elemText, hides GeoGebra bits', {
   });
 });
 
+test('hybrid mode: keeps marble + stylebar, routes marble click to plugin, prevents native', { skip: !haveJsdom() && 'jsdom not installed' }, () => {
+  withDom((window) => {
+    const { createNativeRow } = require('../../packages/sdk/src/algebra-row.js');
+    const ggb = makeFakeGgb(window);
+    // Simulate GeoGebra's own marble handler (native show/hide).
+    let nativeMarbleRan = false;
+    let pluginMarbleRan = false;
+    const handle = createNativeRow({
+      applet: ggb, name: 'ngbHyb', mode: 'hybrid',
+      onMarbleClick: () => { pluginMarbleRan = true; },
+    });
+    assert.strictEqual(handle.mode, 'hybrid');
+    const row = ggb._av.querySelector('[data-ngb-row="ngbHyb"]');
+    const marble = row.querySelector('.marblePanel');
+    const stylebar = row.querySelector('.algebraViewObjectStylebar');
+    // marble + stylebar are KEPT (not hidden) in hybrid mode
+    assert.notStrictEqual(marble.style.display, 'none', 'marble kept');
+    assert.notStrictEqual(stylebar.style.display, 'none', 'stylebar (⋯ menu) kept');
+    // our content host still mounted in the text area
+    assert.ok(row.querySelector('[data-ngb-container="ngbHyb"]'), 'content host mounted');
+
+    // Attach a native handler AFTER ours to confirm ours stops propagation/default.
+    marble.addEventListener('click', () => { nativeMarbleRan = true; });
+    marble.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+    assert.ok(pluginMarbleRan, 'plugin onMarbleClick fired');
+    assert.ok(!nativeMarbleRan, 'native marble behavior prevented (stopImmediatePropagation)');
+    handle.destroy();
+  });
+});
+
+test('hybrid mode: exposes a plugin-controlled marble slot (override has none)', { skip: !haveJsdom() && 'jsdom not installed' }, () => {
+  withDom((window) => {
+    const { createNativeRow } = require('../../packages/sdk/src/algebra-row.js');
+    const ggb = makeFakeGgb(window);
+    const hy = createNativeRow({ applet: ggb, name: 'ngbMarbleSlot', mode: 'hybrid' });
+    assert.ok(hy.marble, 'hybrid exposes a marble slot element');
+    // plugin can render into it
+    const dot = window.document.createElement('span');
+    hy.marble.appendChild(dot);
+    assert.ok(hy.marble.contains(dot), 'plugin content mounts in the marble slot');
+    hy.destroy();
+
+    const ov = createNativeRow({ applet: ggb, name: 'ngbNoMarble', mode: 'override' });
+    assert.strictEqual(ov.marble, null, 'override has no marble slot');
+    ov.destroy();
+  });
+});
+
+test('readGgbTheme returns GeoGebra tokens (or safe fallbacks)', { skip: !haveJsdom() && 'jsdom not installed' }, () => {
+  withDom(() => {
+    const { readGgbTheme } = require('../../packages/sdk/src/algebra-row.js');
+    const t = readGgbTheme();
+    assert.ok(t && typeof t === 'object');
+    // fallbacks must be present even without GeoGebra's stylesheet in jsdom
+    assert.ok(/^#|rgb/.test(t.primary), 'primary color present');
+    assert.ok(t.fontFamily && t.fontFamily.length > 0, 'fontFamily present');
+    assert.ok(t.selection, 'selection token present');
+  });
+});
+
 test('frees the row height so content drives it, and restores styles on destroy', { skip: !haveJsdom() && 'jsdom not installed' }, () => {
   withDom((window) => {
     const { createNativeRow } = require('../../packages/sdk/src/algebra-row.js');
@@ -114,11 +174,12 @@ test('frees the row height so content drives it, and restores styles on destroy'
     const elem = row.querySelector('.elem');
     const content = row.querySelector('.elemText');
 
-    // Height constraints relaxed so our content can drive the row height.
+    // Height: content can grow (height:auto) but the row keeps a native-matching
+    // MIN height so a short row isn't shorter than GeoGebra's own rows.
     assert.strictEqual(row.style.height, 'auto');
-    assert.strictEqual(row.style.minHeight, '0');
+    assert.match(row.style.minHeight, /^\d+px$/, 'row has a px min-height (native-matching)');
     assert.strictEqual(row.style.overflow, 'visible');
-    assert.strictEqual(elem.style.minHeight, '0');
+    assert.match(elem.style.minHeight, /^\d+px$/, 'elem has a px min-height');
     assert.strictEqual(content.style.height, 'auto');
 
     handle.destroy();

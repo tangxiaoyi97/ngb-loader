@@ -74,6 +74,7 @@ ${bold('Commands')}
   status                    Show the injection state of a target
   inject                    Inject the GGB-Extend proxy (takes over launch)
   uninstall                 Restore GeoGebra to its original state
+  debug                     Launch the injected GeoGebra with DevTools open
   gui                       Launch the graphical web installer
 
 ${bold('Options')}
@@ -205,6 +206,64 @@ async function cmdGui(args) {
   }
 }
 
+// Resolve the OS executable inside an injected app bundle / install dir.
+function resolveExecutable(target, platform) {
+  if (platform === 'darwin') {
+    const appDir = target.appBundle;
+    if (!appDir) return null;
+    const macOS = path.join(appDir, 'Contents', 'MacOS');
+    try {
+      // CFBundleExecutable from Info.plist if we can read it; else first file.
+      const plist = path.join(appDir, 'Contents', 'Info.plist');
+      if (fs.existsSync(plist)) {
+        const txt = fs.readFileSync(plist, 'utf8');
+        const m = txt.match(/<key>CFBundleExecutable<\/key>\s*<string>([^<]+)<\/string>/);
+        if (m && fs.existsSync(path.join(macOS, m[1]))) return path.join(macOS, m[1]);
+      }
+      const files = fs.readdirSync(macOS).filter((f) => !f.startsWith('.'));
+      if (files.length) return path.join(macOS, files[0]);
+    } catch { /* fall through */ }
+    return null;
+  }
+  // Windows / Linux: the executable sits next to the resources dir (…/<dir>/<exe>).
+  const installDir = target.resources ? path.dirname(target.resources) : null;
+  if (!installDir) return null;
+  try {
+    const wanted = platform === 'win32' ? /\.exe$/i : /geogebra/i;
+    const files = fs.readdirSync(installDir).filter((f) => wanted.test(f));
+    if (files.length) return path.join(installDir, files[0]);
+  } catch { /* ignore */ }
+  return null;
+}
+
+async function cmdDebug(args) {
+  const target = pickSingle(resolveTarget(args));
+  if (target.state !== 'injected') {
+    console.log(yellow(`Target is "${target.state}", not injected — inject first:`));
+    console.log(dim('  npm run cli -- inject'));
+    return 1;
+  }
+  const exe = resolveExecutable(target, args.platform || process.platform);
+  if (!exe || !fs.existsSync(exe)) {
+    console.error(red('Could not find the GeoGebra executable to launch.'));
+    console.error(dim(`  bundle: ${target.appBundle || target.resources}`));
+    return 1;
+  }
+  console.log(bold('\nLaunching GeoGebra with DevTools (debug mode):'));
+  console.log('  ' + (target.appBundle || exe));
+  console.log(dim('  GGB_EXTEND_DEBUG=1 — DevTools opens on each window; close this terminal to detach logs.\n'));
+  const { spawn } = require('child_process');
+  const child = spawn(exe, [], {
+    env: { ...process.env, GGB_EXTEND_DEBUG: '1' },
+    stdio: 'inherit',
+    detached: false,
+  });
+  return new Promise((resolve) => {
+    child.on('error', (e) => { console.error(red('Launch failed: ') + (e && e.message)); resolve(1); });
+    child.on('exit', (code) => { console.log(dim(`\nGeoGebra exited (code ${code}).`)); resolve(0); });
+  });
+}
+
 /* ------------------------------- main -------------------------------- */
 async function main() {
   const argv = process.argv.slice(2);
@@ -219,6 +278,7 @@ async function main() {
       case 'status': return await cmdStatus(args);
       case 'inject': return await cmdInject(args);
       case 'uninstall': return await cmdUninstall(args);
+      case 'debug': return await cmdDebug(args);
       case 'gui': return await cmdGui(args);
       default:
         console.error(red(`Unknown command: ${cmd}`));

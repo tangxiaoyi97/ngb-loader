@@ -515,7 +515,45 @@ async onEnable(ctx) {
 | `reattach()` | Force a re-hijack (rarely needed; done automatically on full tree rebuilds). |
 | `destroy()` | Remove the container and delete the backing object (auto on disable/unload). |
 
-Options: `{ name?, onAttached?(), onRemoved?() }`.
+Options: `{ mode?, name?, onAttached?(), onRemoved?(), onMarbleClick?(e) }`.
+
+**Two modes** (`mode`):
+
+- `'override'` (default) — the framework clears the whole row content and hands you
+  a blank canvas. You control everything (background, layout, styles). Best for a
+  fully custom panel that just happens to live in the list.
+- `'hybrid'` — the framework keeps GeoGebra's native **⋯ stylebar menu** on the
+  right (it keeps its native behavior) and hands you **two slots**: `row.element`
+  (the middle text area) and `row.marble` (the left dot area). You render whatever
+  you want into each — a label in `element`, a dot/icon/status-light in `marble`.
+  The framework isolates the marble's clicks from GeoGebra and also calls your
+  `onMarbleClick(e)`. Best when you want a row that *looks like a native object*
+  but whose dot and content behave your way.
+
+```js
+// hybrid: native-looking row; you own the marble dot + the text content
+const row = ctx.ui.createNativeRow({
+  mode: 'hybrid',
+  onMarbleClick: () => toggleMyThing(),
+  onAttached: () => {
+    row.element.textContent = 'My row';
+    const dot = document.createElement('span');
+    dot.style.cssText = 'display:inline-block;width:11px;height:11px;border-radius:50%;background:#6557D2';
+    row.marble.replaceChildren(dot);   // row.marble is null in override mode
+  },
+});
+```
+
+**Match GeoGebra's look** with `ctx.ui.theme()` — it returns GeoGebra's own tokens
+so your UI blends in and follows GeoGebra's theme:
+
+```js
+const t = ctx.ui.theme();
+// { primary:'#6557D2', primaryVariant:'#F3F0FF', dark:'#5145A8',
+//   light:'#F3F0FF', selection:'rgba(101,87,210,0.2)',
+//   text:'rgb(28,28,31)', fontFamily:'geogebra-sans-serif, …' }
+row.element.style.cssText = `color:${t.text}; font-family:${t.fontFamily}`;
+```
 
 Notes:
 - The row sizes to its content; bound it (e.g. `max-height` + internal scroll) so
@@ -524,6 +562,8 @@ Notes:
   separate objects via `ctx.core` for actual geometry.
 - `createNativeRow` (fused into the list) and `mountInAlgebraView` (docked/floating
   panel) are independent; pick whichever fits, or try the row first and fall back.
+
+The controller also exposes `mode` (`'override'` | `'hybrid'`).
 
 ---
 
