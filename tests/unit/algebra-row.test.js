@@ -151,6 +151,57 @@ test('hybrid mode: exposes a plugin-controlled marble slot (override has none)',
   });
 });
 
+test('native marble ball: filled toggle + onMarbleClick api + expand state', { skip: !haveJsdom() && 'jsdom not installed' }, () => {
+  withDom((window) => {
+    const { createNativeRow } = require('../../packages/sdk/src/algebra-row.js');
+    const ggb = makeFakeGgb(window);
+    let expandedChanges = 0;
+    let lastExpanded = null;
+    const handle = createNativeRow({
+      applet: ggb, name: 'ngbBall', mode: 'hybrid',
+      marble: { kind: 'native', color: '#6557D2', filled: false },
+      onMarbleClick: (api) => { api.toggle(); },                 // click → toggle expand
+      onExpandedChange: (v) => { expandedChanges += 1; lastExpanded = v; },
+    });
+    // native ball rendered in the marble slot
+    const ball = handle.marble.querySelector('span');
+    assert.ok(ball, 'native ball span rendered');
+    assert.match(ball.style.border, /1px solid/, 'ball has 1px border');
+    assert.strictEqual(ball.style.background, 'rgb(255, 255, 255)', 'OFF = white fill (outline look)');
+
+    // toggle filled via handle → solid (40% colour) fill
+    handle.toggleFilled();
+    const ball2 = handle.marble.querySelector('span');
+    assert.match(ball2.style.background, /rgba\(101, ?87, ?210, ?0\.4\)/, 'ON = colour at 40%');
+    assert.strictEqual(handle.isFilled(), true);
+
+    // clicking the marble toggles expand (via onMarbleClick → api.toggle)
+    assert.strictEqual(handle.isExpanded(), false);
+    const panel = ggb._av.querySelector('[data-ngb-row="ngbBall"] .marblePanel');
+    panel.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+    assert.strictEqual(handle.isExpanded(), true, 'click expanded it');
+    assert.strictEqual(expandedChanges, 1, 'onExpandedChange fired once');
+    assert.strictEqual(lastExpanded, true);
+    handle.destroy();
+  });
+});
+
+test('custom marble: plugin render() is used instead of the native ball', { skip: !haveJsdom() && 'jsdom not installed' }, () => {
+  withDom((window) => {
+    const { createNativeRow } = require('../../packages/sdk/src/algebra-row.js');
+    const ggb = makeFakeGgb(window);
+    let rendered = false;
+    const handle = createNativeRow({
+      applet: ggb, name: 'ngbCustomMarble', mode: 'hybrid',
+      marble: { kind: 'custom', render: (el) => { rendered = true; const i = window.document.createElement('i'); i.id = 'myIcon'; el.appendChild(i); } },
+    });
+    assert.ok(rendered, 'custom render called');
+    assert.ok(handle.marble.querySelector('#myIcon'), 'custom icon mounted');
+    assert.ok(!handle.marble.querySelector('span'), 'no native ball when custom');
+    handle.destroy();
+  });
+});
+
 test('readGgbTheme returns GeoGebra tokens (or safe fallbacks)', { skip: !haveJsdom() && 'jsdom not installed' }, () => {
   withDom(() => {
     const { readGgbTheme } = require('../../packages/sdk/src/algebra-row.js');

@@ -1,6 +1,6 @@
 {
   "name": "@neogebra/installer",
-  "version": "1.0.0",
+  "version": "1.8.0",
   "description": "Neogebra graphical installer — Express + WebSocket server bridging a React/Tailwind wizard to the injection engine.",
   "license": "MIT",
   "type": "commonjs",

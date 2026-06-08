@@ -23,7 +23,7 @@
 const path = require('path');
 
 const MANIFEST_NAME = '.ggb-extend.json';
-const FRAMEWORK_VERSION = '1.0.0';
+const FRAMEWORK_VERSION = '1.8.0';
 
 /* ------------------------------------------------------------------ *
  * fs abstraction — defaults to fs-extra if present, else node:fs

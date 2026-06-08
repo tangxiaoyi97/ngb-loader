@@ -515,7 +515,7 @@ async onEnable(ctx) {
 | `reattach()` | Force a re-hijack (rarely needed; done automatically on full tree rebuilds). |
 | `destroy()` | Remove the container and delete the backing object (auto on disable/unload). |
 
-Options: `{ mode?, name?, onAttached?(), onRemoved?(), onMarbleClick?(e) }`.
+Options: `{ mode?, name?, marble?, expanded?, onAttached?(), onRemoved?(), onMarbleClick?(api,e), onExpandedChange?(expanded,api) }`.
 
 **Two modes** (`mode`):
 
@@ -523,24 +523,39 @@ Options: `{ mode?, name?, onAttached?(), onRemoved?(), onMarbleClick?(e) }`.
   a blank canvas. You control everything (background, layout, styles). Best for a
   fully custom panel that just happens to live in the list.
 - `'hybrid'` — the framework keeps GeoGebra's native **⋯ stylebar menu** on the
-  right (it keeps its native behavior) and hands you **two slots**: `row.element`
-  (the middle text area) and `row.marble` (the left dot area). You render whatever
-  you want into each — a label in `element`, a dot/icon/status-light in `marble`.
-  The framework isolates the marble's clicks from GeoGebra and also calls your
-  `onMarbleClick(e)`. Best when you want a row that *looks like a native object*
-  but whose dot and content behave your way.
+  right and gives you the middle text area as `row.element`, plus a **marble** on
+  the left that the framework renders and wires for you. Best when you want a row
+  that *looks like a native object* but whose dot and content behave your way.
+
+**The marble** (`marble`, hybrid only) — a first-class slot the framework manages:
+
+- `marble: { kind: 'native', color, filled }` — the framework draws a **pixel-accurate
+  GeoGebra ball**. `filled: true` = solid ball (the colour at 40%, GeoGebra's "ON"
+  look); `filled: false` = outline-only (white fill + coloured border, "OFF").
+  `color` defaults to the host theme's accent.
+- `marble: { kind: 'custom', render(el, state) }` — you draw anything (icon, badge).
+- The framework isolates the marble's clicks from GeoGebra and calls
+  `onMarbleClick(api, e)`. The `api` lets you drive both the ball and the row:
+  - `api.toggleFilled()` / `api.setFilled(b)` / `api.isFilled()` — flip the ball (e.g. a switch).
+  - `api.toggle()` / `api.expand()` / `api.collapse()` / `api.setExpanded(b)` / `api.isExpanded()` — expand/collapse the row; the framework tracks the state and calls `onExpandedChange(expanded, api)` so you can re-render `element`.
+- The same methods are mirrored on the handle (`row.toggleFilled()`, `row.expand()`, `row.isExpanded()`, `row.setMarbleColor(c)`, …).
 
 ```js
-// hybrid: native-looking row; you own the marble dot + the text content
-const row = ctx.ui.createNativeRow({
+// A switch: native ball, click toggles ON/OFF; text reflects state.
+const sw = ctx.ui.createNativeRow({
   mode: 'hybrid',
-  onMarbleClick: () => toggleMyThing(),
-  onAttached: () => {
-    row.element.textContent = 'My row';
-    const dot = document.createElement('span');
-    dot.style.cssText = 'display:inline-block;width:11px;height:11px;border-radius:50%;background:#6557D2';
-    row.marble.replaceChildren(dot);   // row.marble is null in override mode
-  },
+  marble: { kind: 'native', color: ctx.ui.theme().primary, filled: false },
+  onMarbleClick: (api) => { const on = api.toggleFilled(); sw.element.textContent = on ? 'On' : 'Off'; },
+  onAttached: () => { sw.element.textContent = 'Off'; },
+});
+
+// An expandable panel: click the ball to expand/collapse the row.
+const panel = ctx.ui.createNativeRow({
+  mode: 'hybrid',
+  marble: { kind: 'native' },
+  onMarbleClick: (api) => api.toggle(),
+  onExpandedChange: (open) => { panel.element.textContent = open ? 'expanded content…' : 'Title'; },
+  onAttached: () => { panel.element.textContent = 'Title'; },
 });
 ```
 
@@ -563,7 +578,25 @@ Notes:
 - `createNativeRow` (fused into the list) and `mountInAlgebraView` (docked/floating
   panel) are independent; pick whichever fits, or try the row first and fall back.
 
-The controller also exposes `mode` (`'override'` | `'hybrid'`).
+**Controller (`createNativeRow` return value)** — full reference:
+
+| Member | Description |
+|--------|-------------|
+| `kind` | `'row'`. |
+| `mode` | `'override'` \| `'hybrid'`. |
+| `element` | content area to render into (Shadow DOM); `null` until attached. |
+| `marble` | hybrid custom-marble slot element; `null` for native marble / override. |
+| `objectName` | the backing GeoGebra object's name. |
+| `isAlive()` | `true` while attached. |
+| `reattach()` | force a re-hijack (auto on tree rebuilds). |
+| `destroy()` | remove the container + delete the backing object (auto on disable/unload). |
+| `isFilled()` / `setFilled(b)` / `toggleFilled()` | the native ball's solid/outline state. |
+| `setMarbleColor(c)` | recolour the native ball. |
+| `isExpanded()` / `setExpanded(b)` / `expand()` / `collapse()` / `toggleExpanded()` | framework-tracked expand state; fires `onExpandedChange`. |
+
+The two example plugins — `examples/container-playground` (override / hybrid / switch
+demos) and `examples/geogebra-ai-assistant` (a hybrid conversation row) — are the
+canonical references for this API.
 
 ---
 

@@ -1,6 +1,6 @@
 {
   "name": "@neogebra/desktop",
-  "version": "1.0.0",
+  "version": "1.8.0",
   "description": "Neogebra — a desktop manager that installs a lightweight plugin framework into GeoGebra and manages each install's plugins.",
   "license": "MIT",
   "author": "唐晓翼 <tangxy97@hotmail.com>",

@@ -10,7 +10,7 @@
   /** Ask the host controller to close, so focus/pointer cleanup runs in one place. */
   export let requestClose = () => { open = false; };
 
-  const APP_VERSION = '1.0.0';
+  const APP_VERSION = '1.8.0';
   const GITHUB_URL = 'https://github.com/tangxiaoyi97/ngb-loader';
   const DEPS = [
     ['Electron', 'desktop app runtime'],
@@ -167,7 +167,7 @@
       {/if}
     </div>
 
-    <footer><span>v1.0.0</span><span class="hint">Right-Shift to toggle</span></footer>
+    <footer><span>v1.8.0</span><span class="hint">Right-Shift to toggle</span></footer>
   </aside>
 {/if}
 

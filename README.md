@@ -21,8 +21,16 @@ restore puts everything back, byte‑for‑byte.
   **Right‑Shift**) is itself a built‑in plugin.
 - **A developer SDK** (`@neogebra/sdk`) that wraps GeoGebra's applet API with a
   modern, Promise‑based interface and a clean plugin lifecycle.
+- **A native‑row container system** (`ctx.ui.createNativeRow`) that lets plugins
+  embed UI **inside** GeoGebra's algebra list — in `override` mode (a blank
+  full‑row canvas) or `hybrid` mode (keeps the native ⋯ menu, plus a pixel‑accurate
+  GeoGebra **marble** and the text area as plugin slots, with a click API for
+  toggle/expand). UI matches the host's look and theme.
 - **Per‑install version isolation:** plugin files are shared globally, but
   on/off state is tracked per GeoGebra install.
+- **Example plugins:** a container playground, and an AI assistant that runs as a
+  tool‑using agent (function calling + GeoGebra tools) living right in the algebra
+  list.
 
 ---
 

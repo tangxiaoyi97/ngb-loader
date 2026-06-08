@@ -11,4 +11,4 @@ export {
   runLifecycle,
 } from './plugin.js';
 
-export const VERSION = '1.0.0';
+export const VERSION = '1.8.0';

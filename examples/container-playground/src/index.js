@@ -45,28 +45,37 @@ export default class ContainerPlayground extends Plugin {
       return null;
     }
     const id = nextId();
-    const label = text || (mode === 'hybrid' ? 'Hybrid row — click the dot' : `Container #${id}`);
+    // mode: 'override' | 'hybrid' (marble = expand) | 'switch' (marble = on/off toggle)
+    const kind = mode === 'switch' ? 'hybrid' : mode;
+    const label = text || (mode === 'switch' ? `Switch #${id}` : mode === 'hybrid' ? `Hybrid row #${id}` : `Container #${id}`);
     const entry = { id, mode, handle: null };
+    const accent = (() => { try { const t = ctx.ui.theme && ctx.ui.theme(); return (t && t.primary) || '#6557D2'; } catch { return '#6557D2'; } })();
 
     const handle = ctx.ui.createNativeRow({
       name: `ngbPlayground${id}`,
-      mode,
+      mode: kind,
+      // hybrid/switch get the native GeoGebra ball; switch starts OFF (outline).
+      marble: kind === 'hybrid' ? { kind: 'native', color: accent, filled: false } : undefined,
       onAttached: () => this.renderContainer(entry, label),
       onRemoved: () => { this.rows = this.rows.filter((r) => r !== entry); this.refreshSettings(); },
-      onMarbleClick: () => this.onMarble(entry),
+      onMarbleClick: (api) => {
+        if (mode === 'switch') {
+          // ON/OFF switch: flip the ball fill; the row text reflects state.
+          const on = api.toggleFilled();
+          entry.on = on;
+          this.ctx.log.info(`switch #${entry.id} → ${on ? 'ON' : 'OFF'}`);
+          this.renderContainer(entry);
+        } else {
+          api.toggle();          // hybrid: expand/collapse the row
+        }
+      },
+      onExpandedChange: () => this.renderContainer(entry),
     });
     entry.handle = handle;
     this.rows.push(entry);
     if (handle.element) this.renderContainer(entry, label);
     this.refreshSettings();
     return entry;
-  }
-
-  onMarble(entry) {
-    // hybrid mode: we own the marble. Toggle a little state + reflect it.
-    entry.on = !entry.on;
-    this.ctx.log.info(`marble on #${entry.id} → ${entry.on ? 'ON' : 'OFF'}`);
-    this.renderContainer(entry);
   }
 
   renderContainer(entry, labelMaybe) {
@@ -93,22 +102,17 @@ export default class ContainerPlayground extends Plugin {
       box.append(span, btn);
       el.appendChild(box);
     } else {
-      // hybrid: the framework keeps the ⋯ menu (right) and hands us TWO slots:
-      // row.element (the text area) and row.marble (the left dot area). We paint
-      // our own dot in the marble slot and our label in the text slot.
+      // hybrid/switch: the FRAMEWORK draws the native ball in the marble slot and
+      // routes its click; we only fill the text slot. (For 'switch' the ball's
+      // fill is the on/off state, toggled in onMarbleClick.)
       el.innerHTML = '';
       const span = document.createElement('span');
       span.style.cssText = `font-family:${font}; color:${text}; font-size:14px;`;
-      span.textContent = entry.label || 'Hybrid row';
+      const expanded = entry.handle && entry.handle.isExpanded && entry.handle.isExpanded();
+      span.textContent = entry.mode === 'switch'
+        ? `${entry.label || 'Switch'} — ${entry.on ? 'ON' : 'OFF'}`
+        : (entry.label || 'Hybrid row') + (expanded ? ' (expanded)' : '');
       el.appendChild(span);
-      // Render the dot into the marble slot (our content, framework routes clicks).
-      const dotArea = entry.handle && entry.handle.marble;
-      if (dotArea) {
-        dotArea.innerHTML = '';
-        const dot = document.createElement('span');
-        dot.style.cssText = `display:inline-block; width:11px; height:11px; border-radius:50%; box-sizing:border-box; border:2px solid ${accent}; background:${entry.on ? accent : 'transparent'};`;
-        dotArea.appendChild(dot);
-      }
     }
   }
 
@@ -191,6 +195,8 @@ export default class ContainerPlayground extends Plugin {
     addOverride.addEventListener('click', () => { this.spawn('override', input.value.trim() || undefined); });
     const addHybrid = h('button', { class: 'btn alt', text: '+ hybrid' });
     addHybrid.addEventListener('click', () => { this.spawn('hybrid', input.value.trim() || undefined); });
+    const addSwitch = h('button', { class: 'btn alt', text: '+ switch' });
+    addSwitch.addEventListener('click', () => { this.spawn('switch', input.value.trim() || undefined); });
 
     const list = h('div', { class: 'list' });
     if (!this.rows.length) list.append(h('div', { class: 'empty', text: 'No containers yet — add one above.' }));
@@ -211,7 +217,7 @@ export default class ContainerPlayground extends Plugin {
       h('div', { class: 'body' }, [
         h('div', { class: 'hint', text: 'Spawn native-row containers and watch them appear in the algebra list. Override = fully custom; Hybrid = keeps the native dot + ⋯ menu (click the dot to toggle).' }),
         h('div', { class: 'row' }, [input]),
-        h('div', { class: 'row' }, [addOverride, addHybrid]),
+        h('div', { class: 'row' }, [addOverride, addHybrid, addSwitch]),
         h('div', { class: 'sect', text: `Active containers (${this.rows.length})` }),
         list,
       ]),

@@ -1,6 +1,6 @@
 {
   "name": "@neogebra/injector-core",
-  "version": "1.0.0",
+  "version": "1.8.0",
   "description": "Cross-platform injection engine for GGB-Extend: detects GeoGebra installs, performs safe dual ASAR/folder route-redirection, and supports clean uninstall.",
   "license": "MIT",
   "type": "commonjs",
