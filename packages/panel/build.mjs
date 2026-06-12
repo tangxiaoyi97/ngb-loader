@@ -24,7 +24,7 @@ const options = {
   format: 'iife',
   outfile: join(__dirname, 'dist', 'panel.bundle.js'),
   platform: 'browser',
-  target: ['chrome110'], // Electron 38 ships a modern Chromium
+  target: ['chrome110'], // Electron ships a modern Chromium
   minify: !dev,
   sourcemap: dev ? 'inline' : false,
   legalComments: 'none',
@@ -40,6 +40,7 @@ const options = {
         // Plain Svelte components (NOT customElement) — we mount manually into a
         // shadow root we control, which is simpler & smaller than the CE wrapper.
         css: 'injected',
+        compatibility: { componentApi: 4 },
         dev,
       },
     }),

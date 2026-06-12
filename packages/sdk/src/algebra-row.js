@@ -21,21 +21,36 @@
 //     reroute GeoGebra's own remove event back to the plugin so cleanup is sync.
 //
 // This module is generic. It knows nothing about any specific plugin.
+//
+// P1: all GeoGebra selectors/metrics/locators come from the ggb-dom-adapter
+// (version-profiled, runtime-measured); DOM watching goes through the shared
+// observer; and degradation is graceful — if GeoGebra's anatomy doesn't match
+// the profile, NO row is rendered and the helper object is removed (a missing
+// feature, never a misplaced skeleton).
 
-const CONTAINER_ATTR = 'data-ngb-container';   // marks the content node we own
-const ROW_ATTR = 'data-ngb-row';               // marks the .avItem row we own
-const MARBLE_ATTR = 'data-ngb-marble';         // marks the marble host we own
-const NAME_PREFIX = 'ngbUI';
+import {
+  sel, metrics as adapterMetrics, findAlgebraView, findRowByName, selfCheck,
+} from './ggb-dom-adapter.js';
+import { subscribeDom } from './shared-observer.js';
 
-// Layout constants, all in px. These are GeoGebra Classic 6 metrics measured
-// against the live DOM — do NOT change without re-measuring against GeoGebra.
-const NATIVE_ROW_HEIGHT = 48;  // a plain single-line object row
-const NATIVE_BALL_PX = 18;     // marble ball content box (1px border → 20px rendered)
-const BALL_BORDER_PX = 1;      // marble ball border width
-const MARBLE_HOST_PX = NATIVE_BALL_PX + 2 * BALL_BORDER_PX; // 20px host around the ball
-const MARBLE_PANEL_PX = 58;    // native marble panel footprint (its own padding: 0 18px)
-const CONTENT_INDENT_PX = 68;  // native content indent (58px marble + gap)
-const ROW_RIGHT_PAD_PX = 40;   // room to clear the native ⋯ stylebar
+// Session-random, neutral markers (clean namespace): no framework branding in
+// the live DOM or in GeoGebra object names, and no stable strings another
+// script (or a curious user) could key off. Regenerated each page load; all
+// internal lookups go through these constants. Exported via __internals for
+// unit tests only.
+const SESSION_TOKEN = `x${Math.random().toString(36).slice(2, 8)}`;
+const CONTAINER_ATTR = `data-${SESSION_TOKEN}c`;   // marks the content node we own
+const ROW_ATTR = `data-${SESSION_TOKEN}r`;         // marks the .avItem row we own
+const MARBLE_ATTR = `data-${SESSION_TOKEN}m`;      // marks the marble host we own
+// Helper-object name prefix: neutral + random (GeoGebra labels must start with
+// a letter). These objects never reach saved files (see helper registry below).
+const NAME_PREFIX = `u${Math.random().toString(36).replace(/[^a-z]/g, '').slice(0, 4) || 'q'}`;
+// Neutral keys for expando properties we must hang on GeoGebra's own nodes.
+const SWALLOW_KEY = `__${SESSION_TOKEN}s`;
+
+// Layout metrics come from the adapter (profile constants, overlaid with live
+// measurements when a real row is available). Only presentation constants that
+// are OURS (not GeoGebra's) stay here.
 const FILLED_ALPHA = 0.4;      // "visible/ON" ball: object colour at 40%
 const BALL_OFF_FILL = '#ffffff';        // "OFF" ball fill (outline look)
 const DEFAULT_MARBLE_COLOR = 'rgb(101,87,210)'; // fallback when no theme primary
@@ -53,9 +68,100 @@ function getApplet(opts) {
   return null;
 }
 
-function findAlgebraView() {
-  if (typeof document === 'undefined') return null;
-  return document.querySelector('.algebraView') || document.querySelector('.gwt-Tree.algebraView') || null;
+// ---------------------------------------------------------------------------
+// Helper-object registry + save-path hook (portable documents).
+//
+// Our native rows are backed by REAL GeoGebra objects, which would otherwise be
+// serialized into .ggb files the user saves and shares — leaking framework
+// artifacts into documents opened on machines without the framework. To keep
+// saved files indistinguishable from stock, we hook the applet's export
+// methods (getBase64 / getXML / getFileJSON): before serialization all helper
+// objects are deleted, after it they are recreated, and each row re-hijacks
+// its rebuilt DOM via its existing observer. Row remove-listeners consult
+// `isHelperSuspended` so the save-time deletion is NOT treated as the user
+// deleting the row.
+const SAVE_HOOK_METHODS = ['getBase64', 'getXML', 'getFileJSON'];
+const RESTORE_SAFETY_MS = 5000;
+const appletHelpers = typeof WeakMap !== 'undefined' ? new WeakMap() : null;
+
+function helperReg(applet) {
+  if (!appletHelpers || !applet) return null;
+  let reg = appletHelpers.get(applet);
+  if (!reg) {
+    reg = { names: new Set(), suspended: false };
+    appletHelpers.set(applet, reg);
+    installSaveHook(applet, reg);
+  }
+  return reg;
+}
+
+function registerHelperObject(applet, name) {
+  const reg = helperReg(applet);
+  if (reg) reg.names.add(name);
+}
+
+function unregisterHelperObject(applet, name) {
+  const reg = appletHelpers && applet ? appletHelpers.get(applet) : null;
+  if (reg) reg.names.delete(name);
+}
+
+/** True while a save-time delete/recreate cycle is in flight for this object. */
+export function isHelperSuspended(applet, name) {
+  const reg = appletHelpers && applet ? appletHelpers.get(applet) : null;
+  return !!(reg && reg.suspended && reg.names.has(name));
+}
+
+function recreateHelper(applet, name) {
+  try {
+    if (applet.evalCommand(`${name}=1`)) {
+      try { applet.setVisible && applet.setVisible(name, false); } catch { /* ignore */ }
+      try { applet.setAuxiliary && applet.setAuxiliary(name, false); } catch { /* ignore */ }
+    }
+  } catch { /* ignore */ }
+}
+
+function installSaveHook(applet, reg) {
+  for (const method of SAVE_HOOK_METHODS) {
+    const orig = applet[method];
+    if (typeof orig !== 'function') continue;
+    // eslint-disable-next-line no-loop-func
+    applet[method] = function sanitizedExport(...args) {
+      // Nothing to hide / re-entrant call during a cycle → pass through.
+      if (!reg.names.size || reg.suspended) return orig.apply(this, args);
+      // getXML('objName') queries a single object — not a document export.
+      if (method === 'getXML' && args.length > 0 && typeof args[0] === 'string') {
+        return orig.apply(this, args);
+      }
+      const names = [...reg.names];
+      reg.suspended = true;
+      for (const n of names) { try { applet.deleteObject(n); } catch { /* ignore */ } }
+      let restored = false;
+      const restore = () => {
+        if (restored) return;
+        restored = true;
+        for (const n of names) recreateHelper(applet, n);
+        reg.suspended = false;
+      };
+      // Async form (getBase64(cb) / getBase64(flag, cb)): restore once the
+      // callback fires (serialization finished), with a safety timer in case
+      // it never does.
+      const cbIndex = args.findIndex((a) => typeof a === 'function');
+      if (cbIndex >= 0) {
+        const userCb = args[cbIndex];
+        const patched = args.slice();
+        patched[cbIndex] = (...cbArgs) => {
+          try { return userCb(...cbArgs); } finally { restore(); }
+        };
+        try {
+          return orig.apply(this, patched);
+        } finally {
+          setTimeout(restore, RESTORE_SAFETY_MS);
+        }
+      }
+      // Sync form: serialize while helpers are gone, then restore immediately.
+      try { return orig.apply(this, args); } finally { restore(); }
+    };
+  }
 }
 
 // Read GeoGebra's own theme so plugins can match it (and follow theme changes).
@@ -81,36 +187,21 @@ export function readGgbTheme() {
   } catch { return { ...THEME_FALLBACK }; }
 }
 
-// Walk up from a node to the enclosing `.avItem` row (the unit GeoGebra lays out).
-function closestAvItem(node, stopAt) {
-  let p = node;
-  while (p && p !== stopAt) {
-    const cls = `${(p.className && (p.className.baseVal || p.className)) || ''}`;
-    if (/\bavItem\b/.test(cls)) return p;
-    p = p.parentElement;
-  }
-  return null;
-}
-
-// Find the row GeoGebra just rendered for `name`, by its definition text. We use
-// this ONLY at hijack time (before we clear the text); afterwards we rely on our
-// own data-attr + saved reference.
-function findRowByName(av, name) {
-  if (!av) return null;
-  // The definition lives in `.avPlainText[aria-label^="name ="]` or as text.
-  const labelled = av.querySelector(`.avPlainText[aria-label^="${name} ="], .avPlainText[aria-label="${name}"]`);
-  if (labelled) { const row = closestAvItem(labelled, av); if (row) return row; }
-  // Fallback: text walk.
-  let walker;
-  try { walker = document.createTreeWalker(av, NodeFilter.SHOW_TEXT, null); } catch { return null; }
-  let n;
-  while ((n = walker.nextNode())) {
-    if (n.textContent && n.textContent.includes(name)) {
-      const row = closestAvItem(n.parentElement, av);
-      return row || n.parentElement;
+// Detect GeoGebra's current light/dark mode by sampling the page background
+// luminance (GeoGebra exposes no theme flag). Replaces the former
+// window.__ggbExtendTheme__ global (clean namespace). Returns 'light' | 'dark'.
+export function detectThemeMode() {
+  try {
+    const probe = document.body || document.documentElement;
+    const bg = getComputedStyle(probe).backgroundColor || 'rgb(255,255,255)';
+    const m = bg.match(/rgba?\(([^)]+)\)/);
+    if (m) {
+      const [r, g, b, a] = m[1].split(',').map((s) => parseFloat(s));
+      if (a === 0) return 'light'; // transparent → GeoGebra's default light canvas
+      return (0.299 * r + 0.587 * g + 0.114 * b) / 255 < 0.5 ? 'dark' : 'light';
     }
-  }
-  return null;
+  } catch { /* headless */ }
+  return 'light';
 }
 
 let uidCounter = 0;
@@ -148,12 +239,13 @@ function hostCss(inline) {
 // must match content-box (border-box would render only 18px — 2px too small).
 // flex:0 0 auto + min-* so flex parents can't squish it into an ellipse.
 function nativeBallCss(color, filled) {
+  const M = adapterMetrics();
   return [
     'display:block', 'box-sizing:content-box',
-    `width:${NATIVE_BALL_PX}px`, `height:${NATIVE_BALL_PX}px`,
-    `min-width:${NATIVE_BALL_PX}px`, `min-height:${NATIVE_BALL_PX}px`,
+    `width:${M.ballPx}px`, `height:${M.ballPx}px`,
+    `min-width:${M.ballPx}px`, `min-height:${M.ballPx}px`,
     'flex:0 0 auto', 'border-radius:50%',
-    `border:${BALL_BORDER_PX}px solid ${color}`,
+    `border:${M.ballBorderPx}px solid ${color}`,
     `background:${filled ? toAlpha(color, FILLED_ALPHA) : BALL_OFF_FILL}`,
   ].join(';');
 }
@@ -188,7 +280,7 @@ export function createNativeRow(opts = {}) {
   let alive = false;
   let destroyed = false;
   let removeListener = null;
-  let observer = null;
+  let unsubscribe = null;   // shared-observer subscription
   let reattachTimer = null;
 
   const appletReady = (a) => !!(a && typeof a.evalCommand === 'function');
@@ -205,6 +297,8 @@ export function createNativeRow(opts = {}) {
     if (created) {
       try { applet.setVisible && applet.setVisible(objectName, false); } catch { /* ignore */ }
       try { applet.setAuxiliary && applet.setAuxiliary(objectName, false); } catch { /* ignore */ }
+      // Keep this helper out of any saved/exported document (see save hook above).
+      registerHelperObject(applet, objectName);
     }
     return created;
   }
@@ -275,8 +369,9 @@ export function createNativeRow(opts = {}) {
   let marbleNode = null;       // the GeoGebra .marblePanel we took over
   let marbleHost = null;       // our host inside it
   function wireMarble(targetRow) {
-    const panel = targetRow.querySelector('.marblePanel');
+    const panel = targetRow.querySelector(sel('marblePanel'));
     if (!panel) return;
+    const M = adapterMetrics();
     marbleNode = panel;
     // The native marble is hidden (setVisible false → 0x0) which collapses the
     // panel. Restore the panel to GeoGebra's NATIVE marble footprint (58px wide,
@@ -287,20 +382,21 @@ export function createNativeRow(opts = {}) {
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
-      width: `${MARBLE_PANEL_PX}px`,
-      minWidth: `${MARBLE_PANEL_PX}px`,
+      width: `${M.marblePanelPx}px`,
+      minWidth: `${M.marblePanelPx}px`,
       height: '100%',
       left: '0px',     // keep it pinned at the row's left edge
     });
     // Build (once) a host the plugin renders its marble content into.
     if (!marbleHost) {
+      const hostPx = M.ballPx + 2 * M.ballBorderPx; // rendered ball box
       const built = buildHost(true);   // inline host with event isolation
       marbleHost = built.h;
       marbleHost.__content = built.content;
       marbleHost.setAttribute(MARBLE_ATTR, objectName);
-      // Host sized to the 20px rendered ball (18px content + 2px border), centered;
+      // Host sized to the rendered ball (content + border), centered;
       // flex:0 0 auto so the panel's flex layout can't squish the circle.
-      marbleHost.style.cssText = `all: initial; display: flex; align-items: center; justify-content: center; width: ${MARBLE_HOST_PX}px; height: ${MARBLE_HOST_PX}px; flex: 0 0 auto; box-sizing: border-box;`;
+      marbleHost.style.cssText = `all: initial; display: flex; align-items: center; justify-content: center; width: ${hostPx}px; height: ${hostPx}px; flex: 0 0 auto; box-sizing: border-box;`;
       built.content.style.cssText = 'all: initial; display: flex; align-items: center; justify-content: center; flex: 0 0 auto; box-sizing: border-box;';
     }
     panel.textContent = '';            // remove GeoGebra's own (hidden) marble dot
@@ -316,7 +412,7 @@ export function createNativeRow(opts = {}) {
       swallow(e);
       if (typeof opts.onMarbleClick === 'function') { try { opts.onMarbleClick(marbleApi, e); } catch { /* ignore */ } }
     };
-    panel.__ngbSwallow = swallow;
+    panel[SWALLOW_KEY] = swallow;
     for (const t of ['pointerdown', 'mousedown']) panel.addEventListener(t, swallow, true);
     panel.addEventListener('click', marbleHandler, true);
   }
@@ -377,15 +473,16 @@ export function createNativeRow(opts = {}) {
   // stylebar to dodge). Keep a native-matching MIN height so a short panel still
   // reads like a real row (not shorter); taller content expands past it.
   function applyOverrideLayout(targetRow, elem, content) {
+    const M = adapterMetrics();
     // Hide everything GeoGebra owns so the row reads as a clean panel.
-    for (const sel of ['.marblePanel', '.checkboxPanel', '.algebraViewObjectStylebar']) {
-      const node = targetRow.querySelector(sel);
+    for (const s of [sel('marblePanel'), sel('checkboxPanel'), sel('stylebar')]) {
+      const node = targetRow.querySelector(s);
       if (node) setStyle(node, 'display', 'none');
     }
     for (const node of [targetRow, elem]) {
       setStyles(node, {
         height: 'auto',
-        minHeight: `${NATIVE_ROW_HEIGHT}px`,
+        minHeight: `${M.rowHeight}px`,
         maxHeight: 'none',
         overflow: 'visible',
         alignItems: 'stretch',
@@ -411,29 +508,35 @@ export function createNativeRow(opts = {}) {
   // over the content box: indent past our marble on the left, leave room for the ⋯
   // menu on the right, fill the rest, and vertically center.
   function applyHybridLayout(targetRow, elem, content) {
-    // Keep the marble + ⋯ stylebar (native). Only the boolean checkbox (if any) is
-    // hidden — our backing object is a number, so usually there's none.
-    const checkbox = targetRow.querySelector('.checkboxPanel');
-    if (checkbox) setStyle(checkbox, 'display', 'none');
+    const M = adapterMetrics();
+    // Keep the marble (plugin-controlled). The boolean checkbox AND the native
+    // ⋯ stylebar are hidden: the ⋯ menu would operate on the hidden helper
+    // object behind this row — opening it would expose framework internals
+    // (P3-2). The right padding still reserves the native footprint so the row
+    // reads identically.
+    for (const s of [sel('checkboxPanel'), sel('stylebar')]) {
+      const node = targetRow.querySelector(s);
+      if (node) setStyle(node, 'display', 'none');
+    }
     wireMarble(targetRow);
 
     for (const node of [targetRow, elem]) {
       setStyles(node, {
         height: 'auto',
-        minHeight: `${NATIVE_ROW_HEIGHT}px`,
+        minHeight: `${M.rowHeight}px`,
         maxHeight: 'none',
         overflow: 'visible',
       });
     }
     setStyles(content, {
       height: 'auto',
-      minHeight: `${NATIVE_ROW_HEIGHT}px`,
+      minHeight: `${M.rowHeight}px`,
       maxHeight: 'none',
       overflow: 'visible',
       boxSizing: 'border-box',
       padding: '0',
-      paddingLeft: `${CONTENT_INDENT_PX}px`,   // match native indent (58px marble + gap)
-      paddingRight: `${ROW_RIGHT_PAD_PX}px`,   // clear the native ⋯ stylebar
+      paddingLeft: `${M.contentIndentPx}px`,   // match native indent (marble + gap)
+      paddingRight: `${M.rowRightPadPx}px`,    // clear the native ⋯ stylebar
       display: 'flex',
       flexDirection: 'column',
       justifyContent: 'center',
@@ -445,8 +548,12 @@ export function createNativeRow(opts = {}) {
   // the marble click to the plugin, and only fill the text area with our content.
   function hijackRow(targetRow) {
     if (!targetRow) return false;
-    const content = targetRow.querySelector('.elemText') || targetRow;
-    const elem = targetRow.querySelector('.elem') || targetRow;
+    // Graceful degradation: the row MUST match the profile's anatomy. Falling
+    // back to styling the row itself produced misplaced skeletons on unknown
+    // GeoGebra versions — refuse instead (no render beats a wrong render).
+    const content = targetRow.querySelector(sel('elemText'));
+    const elem = targetRow.querySelector(sel('elem'));
+    if (!content || !elem) return false;
 
     if (mode === 'override') applyOverrideLayout(targetRow, elem, content);
     else applyHybridLayout(targetRow, elem, content);
@@ -494,12 +601,12 @@ export function createNativeRow(opts = {}) {
   }
 
   function cleanupDom() {
-    if (observer) { try { observer.disconnect(); } catch { /* ignore */ } observer = null; }
+    if (unsubscribe) { try { unsubscribe(); } catch { /* ignore */ } unsubscribe = null; }
     if (reattachTimer) { clearTimeout(reattachTimer); reattachTimer = null; }
     if (marbleNode) {
       try {
-        if (marbleNode.__ngbSwallow) {
-          for (const t of ['pointerdown', 'mousedown']) marbleNode.removeEventListener(t, marbleNode.__ngbSwallow, true);
+        if (marbleNode[SWALLOW_KEY]) {
+          for (const t of ['pointerdown', 'mousedown']) marbleNode.removeEventListener(t, marbleNode[SWALLOW_KEY], true);
         }
         if (marbleHandler) marbleNode.removeEventListener('click', marbleHandler, true);
       } catch { /* ignore */ }
@@ -513,37 +620,54 @@ export function createNativeRow(opts = {}) {
   // remove listener, then hijack the rendered row (retrying as GeoGebra paints).
   function start() {
     if (destroyed) return;
+
+    // Graceful degradation: if the live DOM contradicts the profile (rows exist
+    // but their anatomy doesn't match), do NOT create a backing object at all —
+    // it would show up as an unhijacked raw row in the algebra list.
+    const health = selfCheck();
+    if (health.checks.rowAnatomy === 'broken' || !health.checks.metricsSane) return;
+
     createObject();
 
-    try {
-      observer = new MutationObserver((mutations) => {
-        for (const m of mutations) {
-          if (m.target && m.target.closest && m.target.closest(`[${CONTAINER_ATTR}]`)) continue;
-          scheduleReattach();
-          break;
-        }
-      });
-      const root = findAlgebraView() || document.body || document.documentElement;
-      if (root) observer.observe(root, { childList: true, subtree: true });
-    } catch { /* unavailable in tests */ }
+    // Single shared observer (P1-3): one watcher per document, fanned out.
+    unsubscribe = subscribeDom((mutations) => {
+      for (const m of mutations) {
+        if (m.target && m.target.closest && m.target.closest(`[${CONTAINER_ATTR}]`)) continue;
+        scheduleReattach();
+        break;
+      }
+    });
 
     // Reroute GeoGebra's own delete back to the plugin: if the user deletes this
     // object (or undo removes it), tear our container down too.
     try {
       if (typeof applet.registerRemoveListener === 'function') {
         removeListener = (name) => {
-          if (name === objectName) { alive = false; if (typeof opts.onRemoved === 'function') { try { opts.onRemoved(); } catch { /* ignore */ } } cleanupDom(); }
+          if (name !== objectName) return;
+          // A save-time delete/recreate cycle is NOT a user deletion: keep the
+          // handle alive; the observer re-hijacks the rebuilt row afterwards.
+          if (isHelperSuspended(applet, objectName)) { scheduleReattach(); return; }
+          alive = false;
+          if (typeof opts.onRemoved === 'function') { try { opts.onRemoved(); } catch { /* ignore */ } }
+          cleanupDom();
         };
         applet.registerRemoveListener(removeListener);
       }
     } catch { /* ignore */ }
 
-    // Initial hijack. GeoGebra renders asynchronously, so retry briefly.
+    // Initial hijack. GeoGebra renders asynchronously, so retry briefly. If the
+    // retry budget runs out (row never matched the profile), remove the backing
+    // object so the user is not left looking at an unhijacked raw row.
+    const budget = (opts.attachRetry && opts.attachRetry.tries) || 40;
+    const interval = (opts.attachRetry && opts.attachRetry.intervalMs) || 60;
     let tries = 0;
     (function tryAttach() {
       if (destroyed) return;
       if (attach()) return;
-      if (tries++ < 40) setTimeout(tryAttach, 60);
+      if (tries++ < budget) { setTimeout(tryAttach, interval); return; }
+      unregisterHelperObject(applet, objectName);
+      try { if (applet && applet.deleteObject) applet.deleteObject(objectName); } catch { /* ignore */ }
+      cleanupDom();
     })();
   }
 
@@ -584,6 +708,7 @@ export function createNativeRow(opts = {}) {
       cleanupDom();
       restoreStyledNodes(); // put GeoGebra's row styles back the way we found them
       try { if (removeListener && applet && applet.unregisterRemoveListener) applet.unregisterRemoveListener(removeListener); } catch { /* ignore */ }
+      unregisterHelperObject(applet, objectName);
       // Remove the helper object we created (best effort; ignore if user already did).
       try { if (applet && applet.deleteObject) applet.deleteObject(objectName); } catch { /* ignore */ }
       alive = false;
@@ -591,5 +716,9 @@ export function createNativeRow(opts = {}) {
     },
   };
 }
+
+// Internal constants exposed for unit tests ONLY (session-random by design —
+// production code and plugins must never rely on these names).
+export const __internals = { CONTAINER_ATTR, ROW_ATTR, MARBLE_ATTR, NAME_PREFIX };
 
 export default createNativeRow;

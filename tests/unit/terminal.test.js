@@ -11,7 +11,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { TerminalLog } = require('../../packages/desktop/src/terminal');
+const { TerminalLog, _internals } = require('../../packages/desktop/src/terminal');
 
 test('append + banner write formatted lines to the log file', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ggb-term-'));
@@ -52,6 +52,21 @@ test('openTail is non-throwing and ensures the file exists', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ggb-term2-'));
   const t = new TerminalLog(dir);
   const r = t.openTail(); // may spawn nothing useful in CI, but must not throw
+  t.done(true);
   assert.ok(r && typeof r.ok === 'boolean');
   assert.ok(fs.existsSync(t.file), 'log file created');
+});
+
+test('tail scripts terminate their own follower process after the sentinel', () => {
+  const posix = _internals.buildPosixTailScript('/tmp/neogebra log.txt');
+  assert.match(posix, /mkfifo "\$fifo"/);
+  assert.match(posix, /tail -n \+1 -F "\$log_file" > "\$fifo"/);
+  assert.match(posix, /kill "\$tail_pid"/);
+  assert.doesNotMatch(posix, /tail -n \+1 -F [^\n|]+\| while/);
+  assert.doesNotMatch(posix, /osascript/);
+
+  const ps = _internals.buildPowerShellTailScript('C:\\Temp\\neogebra log.txt');
+  assert.match(ps, /FileShare\]::ReadWrite/);
+  assert.match(ps, /exit 0/);
+  assert.doesNotMatch(ps, /Get-Content[\s\S]*-Wait/);
 });

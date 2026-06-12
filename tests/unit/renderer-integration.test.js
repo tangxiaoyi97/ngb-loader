@@ -35,11 +35,20 @@ function haveJsdom() { try { require.resolve('jsdom'); return true; } catch { re
 
 test('renderer flow: preload chains original, boots runtime, loads builtin panel + user plugin', { skip: !haveJsdom() && 'jsdom not installed' }, async () => {
   const cp = require('child_process');
+  // This test needs a TEST build (E2E hooks compiled in — production strips
+  // them). Rebuild when stale OR when the current dist is a production build.
+  const distPkg = path.join(PROXY_DIST, 'package.json');
+  const isTestBuild = () => {
+    try { return JSON.parse(fs.readFileSync(distPkg, 'utf8')).testBuild === true; } catch { return false; }
+  };
   const distIsStale = !fs.existsSync(RUNTIME_BUNDLE)
     || !fs.existsSync(PRELOAD)
-    || fs.statSync(PRELOAD_SRC).mtimeMs > fs.statSync(PRELOAD).mtimeMs;
+    || fs.statSync(PRELOAD_SRC).mtimeMs > fs.statSync(PRELOAD).mtimeMs
+    || !isTestBuild();
   if (distIsStale) {
-    cp.execFileSync('node', [path.join(REPO, 'scripts', 'build-proxy.mjs')], { stdio: 'inherit' });
+    cp.execFileSync('node', [path.join(REPO, 'scripts', 'build-proxy.mjs')], {
+      stdio: 'inherit', env: { ...process.env, NGB_TEST_BUILD: '1' },
+    });
   }
 
   const { JSDOM } = require('jsdom');
@@ -86,6 +95,10 @@ test('renderer flow: preload chains original, boots runtime, loads builtin panel
   Module._load = function (req, ...rest) { if (req === 'electron') return mockElectron; return origLoad.call(this, req, ...rest); };
   const savedArgv = process.argv.slice();
   process.argv = [...savedArgv, `--ggb-extend-chain-preload=${origPreload}`, '--ggb-extend-active=1'];
+  // Test mode: the preload exposes the stable `ggbExtendHost` alias (production
+  // uses only a session-random bridge key).
+  const savedTestEnv = process.env.GGB_EXTEND_TEST;
+  process.env.GGB_EXTEND_TEST = '1';
   const savedDoc = global.document, savedWin = global.window;
   global.document = window.document; global.window = window;
   global.KeyboardEvent = window.KeyboardEvent; global.CustomEvent = window.CustomEvent;
@@ -95,6 +108,14 @@ test('renderer flow: preload chains original, boots runtime, loads builtin panel
 
   const swallow = (err) => { const m = err && err.message ? err.message : String(err); if (m.includes('insertRule') || m.includes('getComputedStyle')) return; throw err; };
   process.on('unhandledRejection', swallow);
+
+  // Quiet runtime (P0-6): capture every console line produced during the whole
+  // boot and assert the framework emitted NOTHING (debug is off).
+  const consoleLines = [];
+  const savedConsole = { log: console.log, warn: console.warn, error: console.error };
+  console.log = (...a) => { consoleLines.push(a.join(' ')); };
+  console.warn = (...a) => { consoleLines.push(a.join(' ')); };
+  console.error = (...a) => { consoleLines.push(a.join(' ')); };
 
   try {
     delete require.cache[require.resolve(PRELOAD)];
@@ -115,15 +136,37 @@ test('renderer flow: preload chains original, boots runtime, loads builtin panel
     assert.ok(ids.includes('user-plugin'), 'fed user plugin loaded');
     assert.strictEqual(window.__userPluginEnabled, true, 'user plugin onEnable ran');
 
-    // closed shadow host from the panel plugin
-    const host = window.document.getElementById('ggb-extend-host-root');
+    // closed shadow host from the panel plugin (host id is session-random; the
+    // TEST build exposes the element via __ggbExtendPanelHost__)
+    const host = window.__ggbExtendPanelHost__;
     assert.ok(host, 'panel mounted a host element');
     assert.strictEqual(host.shadowRoot, null, 'panel host uses a CLOSED shadow root');
 
     await new Promise((r) => setTimeout(r, 40));
+
+    // Quiet runtime: not a single framework-tagged console line during boot.
+    console.log = savedConsole.log; console.warn = savedConsole.warn; console.error = savedConsole.error;
+    const noisy = consoleLines.filter((l) => /GGB-Extend|\[preload\]|\[runtime\]|\[plugin:/i.test(l));
+    assert.deepStrictEqual(noisy, [], 'framework console output is silent without debug');
+
+    // Clean namespace: no branded markers in the live DOM, and no branded window
+    // globals beyond the explicit TEST-BUILD hooks (production strips even those;
+    // this run is a test build by necessity).
+    assert.strictEqual(window.document.querySelector('[data-ngb-container],[data-ngb-row],[data-ngb-dock],[data-ngb-marble]'), null, 'no legacy data-ngb-* attributes');
+    assert.strictEqual(window.document.getElementById('ggb-extend-host-root'), null, 'no branded host id');
+    const TEST_HOOKS = new Set(['__ggbExtendRuntime__', '__ggbExtendReady__', '__ggbExtendToggle__', '__ggbExtendPanel__', '__ggbExtendPanelHost__', 'ggbExtendHost', '__ggbExtendBoot__']);
+    const branded = Object.getOwnPropertyNames(window)
+      .filter((k) => /ggbextend|ggb-extend|__ngb/i.test(k))
+      .filter((k) => !TEST_HOOKS.has(k));
+    assert.deepStrictEqual(branded, [], 'no branded window globals beyond test-build hooks');
   } finally {
+    console.log = savedConsole.log; console.warn = savedConsole.warn; console.error = savedConsole.error;
     Module._load = origLoad;
     process.argv = savedArgv;
+    if (savedTestEnv === undefined) delete process.env.GGB_EXTEND_TEST;
+    else process.env.GGB_EXTEND_TEST = savedTestEnv;
+    // Tear down jsdom timers (e.g. the panel's theme poll) so the runner exits.
+    try { window.close(); } catch { /* noop */ }
     global.document = savedDoc; global.window = savedWin;
     process.removeListener('unhandledRejection', swallow);
   }

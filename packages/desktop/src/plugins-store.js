@@ -118,7 +118,11 @@ class PluginsStore {
 
   /**
    * List installed plugins merged with enabled state FOR A GIVEN GGB id.
-   * Default ENABLED (only explicit false disables), matching the runtime.
+   * P2-3: default DISABLED — a plugin runs only after the user explicitly
+   * enabled it for that GeoGebra (matches the runtime). Three states:
+   *   true → enabled · false → user disabled · absent → 'new' (never decided)
+   * Built-in plugins are bundled framework components and must stay listed as
+   * enabled even if an old state file contains false for their id.
    */
   async list(ggbId) {
     const out = [];
@@ -130,7 +134,15 @@ class PluginsStore {
       if (!e.isDirectory || !e.isDirectory()) continue;
       const m = this.readManifest(path.join(this.root, e.name));
       if (!m) continue;
-      m.enabled = enabled[m.id] !== false;
+      if (m.builtin) {
+        m.enabled = true;
+        m.status = 'enabled';
+        out.push(m);
+        continue;
+      }
+      const rec = enabled[m.id];
+      m.enabled = rec === true;
+      m.status = rec === true ? 'enabled' : rec === false ? 'disabled' : 'new';
       out.push(m);
     }
     return out;

@@ -21,6 +21,9 @@ await build({
   target: ['chrome110'],
   minify: true,
   legalComments: 'none',
+  // E2E hooks are compiled in ONLY for test builds (NGB_TEST_BUILD=1) and
+  // dead-code eliminated from production bundles.
+  define: { __NGB_TEST_BUILD__: process.env.NGB_TEST_BUILD === '1' ? 'true' : 'false' },
   loader: {
     '.bundle.js': 'text', // import the panel-manager bundle as a string
     '.png': 'dataurl',    // inline the built-in panel icon as a data: URI

@@ -6,6 +6,20 @@
 const path = require('path');
 const { PluginsStore } = require('./plugins-store');
 
+function defaultFs() {
+  try { return require('fs-extra'); } catch {
+    const fsp = require('fs').promises;
+    const fss = require('fs');
+    return {
+      existsSync: fss.existsSync,
+      readFileSync: fss.readFileSync,
+      ensureDir: (p) => fsp.mkdir(p, { recursive: true }),
+      remove: (p) => fsp.rm(p, { recursive: true, force: true }),
+      copy: (from, to, opts = {}) => fsp.cp(from, to, { recursive: true, force: opts.overwrite !== false }),
+    };
+  }
+}
+
 class Manager {
   /**
    * @param {object} deps
@@ -152,7 +166,7 @@ class Manager {
    * @param {string} sourceDir absolute path to a folder containing manifest.json
    */
   async installPluginFromFolder(sourceDir) {
-    const fs = require('fs-extra');
+    const fs = defaultFs();
     const mp = path.join(sourceDir, 'manifest.json');
     if (!fs.existsSync(mp)) { const e = new Error('No manifest.json in that folder'); e.code = 'ENOMANIFEST'; throw e; }
     let manifest;

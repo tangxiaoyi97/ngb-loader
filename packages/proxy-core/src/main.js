@@ -22,8 +22,11 @@ const TAG = '[GGB-Extend]';
 
 // Debug mode: set GGB_EXTEND_DEBUG=1 (env) to open DevTools on each window and
 // emit verbose logs. Invaluable for real-machine troubleshooting.
+// QUIET RUNTIME: outside debug mode the framework logs NOTHING — errors included
+// (fail-safe behavior is unchanged; only the reporting is gated).
 const DEBUG = process.env.GGB_EXTEND_DEBUG === '1' || process.env.GGB_EXTEND_DEBUG === 'true';
 function dbg(...args) { if (DEBUG) console.log(TAG, ...args); }
+function dbgErr(...args) { if (DEBUG) console.error(TAG, ...args); }
 
 function resolveCoreDir() {
   const folder = path.join(__dirname, '..', 'core');
@@ -100,6 +103,47 @@ function setTargetEnabled(state, id, pluginId, enabled) {
   return state;
 }
 
+// ---------------------------------------------------------------------------
+// Network approvals — PER-GGB isolated (like the enabled lists): approving a
+// host for a plugin in one GeoGebra must not grant it in another. New schema:
+//   targets[<ggbId>].netApprovals[pluginId][host] = true|false
+// Back-compat: the old GLOBAL `state.netApprovals[pluginId]` is used as a
+// read fallback while THIS ggb has no record for that plugin, and is copied
+// into the per-target record on first write (seed-on-write migration) so an
+// upgrade doesn't silently drop a user's earlier decisions.
+
+/** Read the approval map for (ggbId, pluginId). Falls back to legacy global. */
+function targetApprovals(state, id, pluginId) {
+  const t = state.targets && state.targets[id] && state.targets[id].netApprovals;
+  if (t && t[pluginId]) return t[pluginId];
+  return (state.netApprovals && state.netApprovals[pluginId]) || {};
+}
+
+/** Ensure (and return) the per-target approval record, seeding from legacy. */
+function ensureTargetApprovals(state, id, pluginId) {
+  if (!state.targets) state.targets = {};
+  if (!state.targets[id]) state.targets[id] = { enabled: {} };
+  if (!state.targets[id].netApprovals) state.targets[id].netApprovals = {};
+  if (!state.targets[id].netApprovals[pluginId]) {
+    const legacy = (state.netApprovals && state.netApprovals[pluginId]) || {};
+    state.targets[id].netApprovals[pluginId] = { ...legacy };
+  }
+  state.version = 2;
+  return state.targets[id].netApprovals[pluginId];
+}
+
+function setTargetApproval(state, id, pluginId, host, allow) {
+  ensureTargetApprovals(state, id, pluginId)[host] = !!allow;
+  return state;
+}
+
+/** Revoke = delete the record → the next access asks the user again. */
+function revokeTargetApproval(state, id, pluginId, host) {
+  const rec = ensureTargetApprovals(state, id, pluginId);
+  delete rec[host];
+  return state;
+}
+
 function ensurePluginEnv(electron) {
   const p = pluginPaths(electron);
   try {
@@ -108,26 +152,106 @@ function ensurePluginEnv(electron) {
       fs.writeFileSync(p.stateFile, JSON.stringify({ version: 1, enabled: {}, settings: {} }, null, 2));
     }
   } catch (err) {
-    console.error(TAG, 'failed to prepare plugin dir:', err && err.message);
+    dbgErr('failed to prepare plugin dir:', err && err.message);
   }
   return p;
 }
+
+// ---------------------------------------------------------------------------
+// state.json concurrency safety. Multiple injected GeoGebra instances share one
+// state.json, so: reads fall back to the last-known-good .bak instead of
+// resetting; writes are ATOMIC (tmp + rename) with a .bak of the previous valid
+// file; and read-modify-write cycles go through updateState(), which holds a
+// cross-process lock (atomic mkdir) and re-reads fresh state inside it — so two
+// instances flipping toggles concurrently can't clobber each other or ever
+// leave a half-written JSON behind.
+
+function defaultState() { return { version: 1, enabled: {}, settings: {} }; }
 
 function readState(stateFile) {
   try {
     return JSON.parse(fs.readFileSync(stateFile, 'utf8'));
   } catch {
-    return { version: 1, enabled: {}, settings: {} };
+    try {
+      return JSON.parse(fs.readFileSync(`${stateFile}.bak`, 'utf8'));
+    } catch {
+      return defaultState();
+    }
   }
 }
 
 function writeState(stateFile, state) {
+  const tmp = `${stateFile}.${process.pid}.${Date.now()}.tmp`;
   try {
-    fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
+    const json = JSON.stringify(state, null, 2);
+    // Keep a backup of the previous VALID file before replacing it.
+    try {
+      const cur = fs.readFileSync(stateFile, 'utf8');
+      JSON.parse(cur);
+      fs.writeFileSync(`${tmp}.bak`, cur);
+      fs.renameSync(`${tmp}.bak`, `${stateFile}.bak`);
+    } catch { /* no previous valid file — nothing to back up */ }
+    fs.writeFileSync(tmp, json);
+    fs.renameSync(tmp, stateFile); // atomic on POSIX & modern Windows
     return true;
   } catch (err) {
-    console.error(TAG, 'failed to persist state:', err && err.message);
+    dbgErr('failed to persist state:', err && err.message);
+    try { fs.rmSync(tmp, { force: true }); } catch { /* ignore */ }
     return false;
+  }
+}
+
+function sleepSync(ms) {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {
+    const end = Date.now() + ms;
+    while (Date.now() < end) { /* spin */ }
+  }
+}
+
+const LOCK_STALE_MS = 5000;
+
+function acquireStateLock(stateFile, timeoutMs = 2000) {
+  const lock = `${stateFile}.lock`;
+  const start = Date.now();
+  for (;;) {
+    try {
+      fs.mkdirSync(lock); // atomic create-or-fail, works cross-process
+      return true;
+    } catch (err) {
+      if (err.code !== 'EEXIST') return false;
+      try {
+        const st = fs.statSync(lock);
+        if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+          fs.rmSync(lock, { recursive: true, force: true }); // crashed holder
+          continue;
+        }
+      } catch { /* raced with the holder's release — retry */ }
+      if (Date.now() - start > timeoutMs) return false;
+      sleepSync(15 + Math.floor(Math.random() * 25));
+    }
+  }
+}
+
+function releaseStateLock(stateFile) {
+  try { fs.rmSync(`${stateFile}.lock`, { recursive: true, force: true }); } catch { /* ignore */ }
+}
+
+/**
+ * Locked read-modify-write: re-reads the CURRENT state under a cross-process
+ * lock, applies `mutate(state)`, persists atomically. Returns the new state,
+ * or null if the write failed.
+ */
+function updateState(stateFile, mutate) {
+  const locked = acquireStateLock(stateFile);
+  if (!locked) dbgErr('state lock unavailable — proceeding unlocked (best effort)');
+  try {
+    const state = readState(stateFile);
+    mutate(state);
+    return writeState(stateFile, state) ? state : null;
+  } finally {
+    if (locked) releaseStateLock(stateFile);
   }
 }
 
@@ -146,21 +270,44 @@ function isBlockedHost(hostname) {
   if (!h) return true;
   if (h === 'localhost' || h.endsWith('.localhost')) return true;
   if (h === '169.254.169.254' || h === 'metadata.google.internal') return true; // cloud metadata
-  // IPv6 loopback / link-local / unique-local
-  if (h === '::1' || h.startsWith('fe80:') || h.startsWith('fc') || h.startsWith('fd')) return true;
+  // IPv6 loopback / link-local / unique-local (literal forms)
+  if (h === '::' || h === '::1' || h.startsWith('fe80:') || h.startsWith('fc') || h.startsWith('fd')) return true;
   // IPv4 literals in private/reserved ranges
-  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (m) {
-    const [a, b] = [Number(m[1]), Number(m[2])];
+  if (/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(h)) return isBlockedIp(h);
+  return false;
+}
+
+/**
+ * P2-1: range check for a RESOLVED IP address (what the socket actually
+ * connects to). The hostname-literal check above can be bypassed by a public
+ * DNS name that resolves into a private network (DNS rebinding) — this is the
+ * authoritative check, run on the result of the DNS lookup itself.
+ */
+function isBlockedIp(ip) {
+  const s = normHost(ip);
+  // IPv4 (also handles IPv4-mapped IPv6 like ::ffff:127.0.0.1)
+  const v4 = s.match(/^(?:::ffff:)?(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
     if (a === 10) return true;                          // 10.0.0.0/8
     if (a === 127) return true;                         // loopback
     if (a === 0) return true;                           // 0.0.0.0/8
-    if (a === 169 && b === 254) return true;            // link-local
+    if (a === 169 && b === 254) return true;            // link-local / metadata
     if (a === 172 && b >= 16 && b <= 31) return true;   // 172.16.0.0/12
     if (a === 192 && b === 168) return true;            // 192.168.0.0/16
+    if (a === 100 && b >= 64 && b <= 127) return true;  // 100.64.0.0/10 (CGNAT)
     if (a >= 224) return true;                          // multicast/reserved
+    return false;
   }
-  return false;
+  // IPv6
+  if (s.includes(':')) {
+    if (s === '::' || s === '::1') return true;          // unspecified / loopback
+    if (s.startsWith('fe80:')) return true;              // link-local
+    if (s.startsWith('fc') || s.startsWith('fd')) return true; // unique-local fc00::/7
+    if (s.startsWith('::ffff:')) return true;            // v4-mapped not caught above → block
+    return false;
+  }
+  return true; // unparseable → refuse
 }
 
 /**
@@ -217,13 +364,34 @@ function netFetch(request = {}, ctx = {}) {
       headers['Content-Length'] = Buffer.byteLength(body);
     }
 
-    const https = require('https');
+    const https = ctx._https || require('https');
+    const dns = require('dns');
+    // P2-1: validate the RESOLVED address, not just the hostname literal. The
+    // socket's own lookup is hooked so the IP that gets connected to is the IP
+    // that was checked (no separate-resolve TOCTOU); DNS-rebinding names that
+    // resolve into private/reserved ranges are refused.
+    const baseLookup = ctx._dnsLookup || dns.lookup;
+    const guardedLookup = (host, options, cb) => {
+      if (typeof options === 'function') { cb = options; options = {}; }
+      baseLookup(host, options, (err, address, family) => {
+        if (err) { cb(err); return; }
+        // options.all → array of {address, family}
+        const addrs = Array.isArray(address) ? address.map((a) => a.address) : [address];
+        const bad = addrs.find((a) => isBlockedIp(a));
+        if (bad) {
+          cb(new Error(`Blocked: ${host} resolves to a private/reserved address (${bad})`));
+          return;
+        }
+        cb(null, address, family);
+      });
+    };
     const req = https.request({
       hostname: target.hostname,
       port: target.port || undefined,
       path: `${target.pathname}${target.search}`,
       method,
       headers,
+      lookup: guardedLookup,
       timeout: Math.max(1000, Math.min(Number(request.timeoutMs) || 60000, 120000)),
     }, (res) => {
       const chunks = [];
@@ -274,7 +442,9 @@ function readPluginManifest(dir) {
     author: manifest.author || 'unknown',
     description: manifest.description || '',
     main: manifest.main || 'index.js',
+    format: manifest.format === 'iife' ? 'iife' : 'esm',
     icon: iconToDataUri(dir, manifest.icon),
+    builtin: !!manifest.builtin,
     permissions: {
       network: Array.isArray(manifest.permissions && manifest.permissions.network)
         ? manifest.permissions.network.map((h) => String(h)) : [],
@@ -324,9 +494,21 @@ function listPlugins(p, id) {
     const dir = path.join(p.root, e.name);
     const m = readPluginManifest(dir);
     if (!m) continue;
-    // Default to ENABLED per THIS GGB: a freshly dropped-in plugin runs without
-    // the user flipping it on. Only an explicit `false` for this GGB disables.
-    m.enabled = enabled[m.id] !== false;
+    // Built-in plugins are bundled framework components and must stay enabled,
+    // even if an old state file contains false for their id.
+    if (m.builtin) {
+      m.enabled = true;
+      m.status = 'enabled';
+      out.push(m);
+      continue;
+    }
+    // P2-3: default DISABLED. A plugin only runs after the user explicitly
+    // enabled it for THIS GeoGebra — dropping a folder into GGB_Plugins must
+    // never execute code on next launch by itself. Three states:
+    //   true → enabled · false → user disabled · absent → 'new' (never decided)
+    const rec = enabled[m.id];
+    m.enabled = rec === true;
+    m.status = rec === true ? 'enabled' : rec === false ? 'disabled' : 'new';
     out.push(m);
   }
   return out;
@@ -344,6 +526,39 @@ function registerIpc(electron) {
 
   const myGgbId = ggbId();
 
+  // P2-2: per-plugin capability tokens. `ggb-extend:net-fetch` used to trust the
+  // payload's self-reported pluginId — any code in the renderer could borrow
+  // another plugin's approved hosts. Now the PRELOAD (not the page) obtains a
+  // random token per plugin over a channel that is NOT exposed on the page
+  // bridge; the runtime hands each plugin a net.fetch closure carrying only its
+  // own token, and the handlers below verify (sender, pluginId, token) together.
+  // eslint-disable-next-line global-require
+  const crypto2 = require('crypto');
+  const netTokens = new Map(); // `${webContentsId}:${pluginId}` → token
+
+  const verifyNetCaller = (evt, pluginId, token) => {
+    const senderId = evt && evt.sender ? evt.sender.id : -1;
+    const expected = netTokens.get(`${senderId}:${pluginId}`);
+    return !!expected && typeof token === 'string' && token === expected;
+  };
+
+  handle('ggb-extend:issue-net-tokens', async (evt) => {
+    const senderId = evt && evt.sender ? evt.sender.id : -1;
+    const tokens = {};
+    for (const plugin of listPlugins(p, myGgbId)) {
+      const t = crypto2.randomBytes(16).toString('hex');
+      netTokens.set(`${senderId}:${plugin.id}`, t);
+      tokens[plugin.id] = t;
+    }
+    // Drop this window's tokens when it goes away.
+    try {
+      evt.sender.once('destroyed', () => {
+        for (const k of [...netTokens.keys()]) if (k.startsWith(`${senderId}:`)) netTokens.delete(k);
+      });
+    } catch { /* test stubs */ }
+    return { ok: true, tokens };
+  });
+
   handle('ggb-extend:get-ggb-id', async () => ({ ok: true, id: myGgbId }));
 
   handle('ggb-extend:get-plugin-list', async () => {
@@ -351,10 +566,8 @@ function registerIpc(electron) {
   });
 
   handle('ggb-extend:toggle-plugin', async (_evt, { id, enabled }) => {
-    const state = readState(p.stateFile);
-    setTargetEnabled(state, myGgbId, id, enabled);
-    const ok = writeState(p.stateFile, state);
-    return { ok, id, enabled: !!enabled, ggbId: myGgbId };
+    const next = updateState(p.stateFile, (state) => setTargetEnabled(state, myGgbId, id, enabled));
+    return { ok: !!next, id, enabled: !!enabled, ggbId: myGgbId };
   });
 
   handle('ggb-extend:open-plugin-folder', async () => {
@@ -366,29 +579,46 @@ function registerIpc(electron) {
     }
   });
 
+  // Open an external link in the user's default browser (NOT an Electron window).
+  // Only http(s) is allowed, so a plugin can't trigger file:// or app-scheme opens.
+  handle('ggb-extend:open-external', async (_evt, { url } = {}) => {
+    try {
+      const u = new URL(String(url || ''));
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return { ok: false, error: 'Only http(s) links can be opened' };
+      await shell.openExternal(u.href);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: String(err && err.message) };
+    }
+  });
+
   handle('ggb-extend:get-settings', async () => {
     const state = readState(p.stateFile);
     return { ok: true, settings: state.settings || {} };
   });
 
   handle('ggb-extend:set-settings', async (_evt, settings) => {
-    const state = readState(p.stateFile);
-    state.settings = Object.assign({}, state.settings, settings || {});
-    const ok = writeState(p.stateFile, state);
-    return { ok, settings: state.settings };
+    const next = updateState(p.stateFile, (state) => {
+      state.settings = Object.assign({}, state.settings, settings || {});
+    });
+    return { ok: !!next, settings: next ? next.settings : null };
   });
 
-  // Guarded network request for a plugin. The plugin must (a) declare the host
-  // in its manifest permissions.network and (b) have the user's approval for it
-  // (persisted in state.json under netApprovals[pluginId]). SSRF targets are
-  // always blocked. `request.pluginId` identifies the caller.
-  handle('ggb-extend:net-fetch', async (_evt, request = {}) => {
+  // Guarded network request for a plugin. The plugin must (a) present its own
+  // capability token (P2-2 — the payload's pluginId alone proves nothing),
+  // (b) declare the host in its manifest permissions.network, and (c) have the
+  // user's approval for it (persisted in state.json under netApprovals).
+  // SSRF targets are blocked at both the hostname and the resolved-IP layer.
+  handle('ggb-extend:net-fetch', async (evt, request = {}) => {
     const pluginId = request.pluginId;
+    if (!verifyNetCaller(evt, pluginId, request.token)) {
+      return { ok: false, status: 0, code: 'EBADCALLER', error: 'Caller identity check failed (invalid plugin token)' };
+    }
     const plugin = listPlugins(p).find((x) => x.id === pluginId);
     if (!plugin) return { ok: false, status: 0, error: 'unknown plugin' };
     const declaredHosts = new Set((plugin.permissions && plugin.permissions.network ? plugin.permissions.network : []).map(normHost));
     const state = readState(p.stateFile);
-    const approvals = (state.netApprovals && state.netApprovals[pluginId]) || {};
+    const approvals = targetApprovals(state, myGgbId, pluginId); // per-GGB isolated
     return netFetch(request, {
       pluginId,
       declaredHosts,
@@ -396,23 +626,53 @@ function registerIpc(electron) {
     });
   });
 
-  // Record the user's decision to allow a plugin to reach a host (persisted).
-  handle('ggb-extend:net-approve', async (_evt, { pluginId, host, allow }) => {
+  // Record the user's decision to allow a plugin to reach a host (persisted,
+  // per-GGB). Same caller check: a plugin must not grant approvals to another.
+  handle('ggb-extend:net-approve', async (evt, { pluginId, host, allow, token } = {}) => {
     if (!pluginId || !host) return { ok: false, error: 'pluginId and host required' };
+    if (!verifyNetCaller(evt, pluginId, token)) {
+      return { ok: false, code: 'EBADCALLER', error: 'Caller identity check failed (invalid plugin token)' };
+    }
+    const next = updateState(p.stateFile, (state) => {
+      setTargetApproval(state, myGgbId, pluginId, normHost(host), allow);
+    });
+    return { ok: !!next };
+  });
+
+  // Approval status for the panel's network-permissions section: the manifest's
+  // declared hosts plus this GGB's recorded decisions. Read-only metadata.
+  handle('ggb-extend:net-approvals', async (_evt, { pluginId } = {}) => {
+    if (!pluginId) return { ok: false, error: 'pluginId required' };
+    const plugin = listPlugins(p, myGgbId).find((x) => x.id === pluginId);
+    const declared = plugin && plugin.permissions && Array.isArray(plugin.permissions.network)
+      ? plugin.permissions.network.map(normHost) : [];
     const state = readState(p.stateFile);
-    if (!state.netApprovals) state.netApprovals = {};
-    if (!state.netApprovals[pluginId]) state.netApprovals[pluginId] = {};
-    state.netApprovals[pluginId][normHost(host)] = !!allow;
-    writeState(p.stateFile, state);
-    return { ok: true };
+    return { ok: true, pluginId, declared, approvals: { ...targetApprovals(state, myGgbId, pluginId) } };
+  });
+
+  // Revoke a recorded decision (panel action). Deliberately UNauthenticated by
+  // plugin token: revoking is the safe direction (the next access re-prompts
+  // the user), and the panel acts for the user, not for a plugin.
+  handle('ggb-extend:net-revoke', async (_evt, { pluginId, host } = {}) => {
+    if (!pluginId || !host) return { ok: false, error: 'pluginId and host required' };
+    const next = updateState(p.stateFile, (state) => {
+      revokeTargetApproval(state, myGgbId, pluginId, normHost(host));
+    });
+    return { ok: !!next };
   });
 
   // Read a plugin's source bundle so the renderer can evaluate it in-page.
+  // P2-2: the entry is resolved and confined to the plugin's own directory —
+  // a manifest `main` like "../../somewhere" must not read outside it.
   handle('ggb-extend:read-plugin-source', async (_evt, { id }) => {
     const plugins = listPlugins(p);
     const plugin = plugins.find((x) => x.id === id);
     if (!plugin) return { ok: false, error: 'plugin not found' };
-    const entry = path.join(plugin.dir, plugin.main);
+    const dirResolved = path.resolve(plugin.dir);
+    const entry = path.resolve(dirResolved, plugin.main);
+    if (entry !== dirResolved && !entry.startsWith(dirResolved + path.sep)) {
+      return { ok: false, error: 'invalid plugin main path' };
+    }
     try {
       const code = fs.readFileSync(entry, 'utf8');
       return { ok: true, id, code, manifest: plugin };
@@ -421,7 +681,7 @@ function registerIpc(electron) {
     }
   });
 
-  console.log(TAG, 'IPC channels registered. Plugins dir:', p.root);
+  dbg('IPC channels registered. Plugins dir:', p.root);
   return p;
 }
 
@@ -449,7 +709,9 @@ function patchBrowserWindow(electron) {
       } catch (err) {
         // Never block window creation because of us.
         usedPatched = false;
-        console.error(TAG, 'option rewrite failed, using original options:', err && err.message);
+        if (process.env.GGB_EXTEND_DEBUG === '1' || process.env.GGB_EXTEND_DEBUG === 'true') {
+          console.error(TAG, 'option rewrite failed, using original options:', err && err.message);
+        }
         super(options);
       }
       // In debug mode, open DevTools so panel-injection logs are visible.
@@ -486,7 +748,7 @@ function patchBrowserWindow(electron) {
       // contextIsolation:true). We only force sandbox:false if it was truthy,
       // and we DO NOT touch contextIsolation/nodeIntegration.
       if (wp.sandbox === true) {
-        console.warn(TAG, 'host requested sandbox:true; disabling for preload injection');
+        dbg('host requested sandbox:true; disabling for preload injection');
       }
       wp.sandbox = false;
 
@@ -558,14 +820,14 @@ function patchBrowserWindow(electron) {
       Module.__ggbExtendElectronView = view;
       installed = verify();
     } catch (err) {
-      console.error(TAG, 'module-loader hook failed:', err && err.message);
+      dbgErr('module-loader hook failed:', err && err.message);
     }
   }
 
   if (installed) {
-    console.log(TAG, 'BrowserWindow patched (preload chaining active).');
+    dbg('BrowserWindow patched (preload chaining active).');
   } else {
-    console.error(TAG, 'FAILED to install patched BrowserWindow — panel will not load.');
+    dbgErr('FAILED to install patched BrowserWindow — panel will not load.');
   }
   PatchedBrowserWindow.__installed = installed;
 }
@@ -579,16 +841,16 @@ function applyHooks() {
   try {
     registerIpc(electron);
   } catch (err) {
-    console.error(TAG, 'IPC registration failed:', err && err.message);
+    dbgErr('IPC registration failed:', err && err.message);
   }
 }
 
 function start() {
-  console.log('\n%s %s', TAG, 'proxy core starting…');
+  dbg('proxy core starting…');
   try {
     applyHooks();
   } catch (err) {
-    console.error(TAG, 'hook installation failed (continuing to boot core):', err && err.stack);
+    dbgErr('hook installation failed (continuing to boot core):', err && err.stack);
   }
   // Hand control to GeoGebra. This must always run.
   bootCore();
@@ -604,10 +866,17 @@ module.exports = {
   ensurePluginEnv,
   readState,
   writeState,
+  updateState,
+  acquireStateLock,
+  releaseStateLock,
   readPluginManifest,
   listPlugins,
   netFetch,
   isBlockedHost,
+  isBlockedIp,
+  targetApprovals,
+  setTargetApproval,
+  revokeTargetApproval,
   registerIpc,
   patchBrowserWindow,
   applyHooks,

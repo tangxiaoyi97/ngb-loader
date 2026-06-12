@@ -1,4 +1,6 @@
 // Dependency-free, browser-safe EventEmitter used across the SDK.
+import { isDebug } from './plugin.js';
+
 export class Emitter {
   constructor() {
     /** @type {Map<string, Set<Function>>} */
@@ -40,8 +42,9 @@ export class Emitter {
     if (!set) return;
     for (const handler of [...set]) {
       try { handler(payload); } catch (err) {
+        // Quiet runtime: only report listener errors when debug is on.
         // eslint-disable-next-line no-console
-        console.error(`[GGB-Extend] listener for "${type}" threw:`, err);
+        if (isDebug()) console.error(`[sdk] listener for "${type}" threw:`, err);
       }
     }
   }

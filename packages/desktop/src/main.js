@@ -65,6 +65,12 @@ function sendLog(entry) {
   try { getTermLog().append(entry); } catch { /* ignore */ }
 }
 
+function openTermLogIfRequested(opts) {
+  if (!opts || !opts.openTerminal) return;
+  const r = getTermLog().openTail();
+  if (!r.ok) sendLog({ level: 'warn', msg: r.error || 'Could not open a terminal', ts: Date.now() });
+}
+
 /**
  * Locate the bundled panel-manager builtin plugin (manifest + compiled bundle),
  * so we can seed it into the on-disk plugin library on first run.
@@ -144,14 +150,18 @@ function registerIpc() {
   ipcMain.handle('ggbx:remove', wrap(async (id, opts) => manager.removeEntry(id, opts)));
   ipcMain.handle('ggbx:inject', wrap(async (id, opts) => {
     getTermLog().banner('Inject');
+    openTermLogIfRequested(opts);
+    const { openTerminal, ...managerOpts } = opts || {};
     const proxyDir = resolveProxyDir();
     sendLog({ level: proxyDir ? 'info' : 'warn', msg: proxyDir ? `Using proxy: ${proxyDir}` : 'No prebuilt proxy found — panel will NOT be available (run "npm run build:proxy")', ts: Date.now() });
-    try { const r = await manager.inject(id, { proxyDir, ...opts }); getTermLog().done(true); return r; }
+    try { const r = await manager.inject(id, { proxyDir, ...managerOpts }); getTermLog().done(true); return r; }
     catch (e) { getTermLog().done(false); throw e; }
   }));
   ipcMain.handle('ggbx:restore', wrap(async (id, opts) => {
     getTermLog().banner('Restore');
-    try { const r = await manager.restore(id, opts); getTermLog().done(true); return r; }
+    openTermLogIfRequested(opts);
+    const { openTerminal, ...managerOpts } = opts || {};
+    try { const r = await manager.restore(id, managerOpts); getTermLog().done(true); return r; }
     catch (e) { getTermLog().done(false); throw e; }
   }));
   // Open the OS terminal tailing the live log file.

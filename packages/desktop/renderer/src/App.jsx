@@ -79,9 +79,10 @@ function App() {
   async function runOp(op) {
     if (!selected) return;
     setBusy(true); setLogs([]);
-    // open the OS terminal to follow the live log (the in-app drawer stays as a fallback)
-    bridge.openTerminal && bridge.openTerminal();
-    const r = op === 'inject' ? await bridge.inject(selected.id) : await bridge.restore(selected.id);
+    // Main opens the OS terminal after it starts a fresh log session; the in-app
+    // drawer stays as a fallback.
+    const opts = { openTerminal: true };
+    const r = op === 'inject' ? await bridge.inject(selected.id, opts) : await bridge.restore(selected.id, opts);
     setBusy(false);
     flash(r.ok ? (op === 'inject' ? 'Injection complete' : 'Restored') : `${op === 'inject' ? 'Injection' : 'Restore'} failed: ${r.error || ''}`, r.ok ? 'ok' : 'error');
     refresh();
@@ -220,7 +221,7 @@ function Home({ entry, busy, plugins, onInject, onRestore, onLaunch, onRemove, o
   const injected = live.state === 'injected';
   const missing = live.state === 'missing';
   const m = stateMeta(live.state);
-  const enabledCount = plugins.filter((p) => p.enabled).length;
+  const enabledCount = plugins.filter((p) => p.builtin || p.enabled).length;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14, paddingTop: 2 }}>
@@ -264,12 +265,12 @@ function Home({ entry, busy, plugins, onInject, onRestore, onLaunch, onRemove, o
       </Card>
 
       <Card className="nx-card" style={{ padding: '18px 22px 20px' }}>
-        <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', marginBottom: 12, gap: 12 }}>
-          <div>
+        <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', marginBottom: 12, gap: 12, flexWrap: 'wrap' }}>
+          <div style={{ minWidth: 180, flex: '1 1 240px' }}>
             <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>Plugins <span style={{ fontSize: 12, fontWeight: 400, color: T.dim }}>· {enabledCount}/{plugins.length} enabled</span></h3>
             <div style={{ fontSize: 12, color: T.sub, marginTop: 3 }}>Settings apply to <b style={{ color: T.text, fontWeight: 500 }}>{entry.label}</b> only (after restart)</div>
           </div>
-          <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+          <div style={{ display: 'flex', gap: 8, flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
             <button className={btnClass('ghost')} style={btn('ghost', 'sm')} onClick={onOpenPluginsFolder} title="Open the shared plugins folder">Open folder</button>
             <button className={btnClass('ghost')} style={btn('ghost', 'sm')} onClick={onRefreshPlugins}>Refresh</button>
             <button className={btnClass('primary')} style={btn('primary', 'sm')} onClick={onAddPlugin}>＋ Add plugin</button>

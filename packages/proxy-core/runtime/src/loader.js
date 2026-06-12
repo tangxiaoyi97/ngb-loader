@@ -47,14 +47,44 @@ export function transformPluginSource(source) {
 }
 
 /**
- * Evaluate a transformed plugin module. Returns its default export (the plugin
- * class or hook object).
+ * Evaluate a plugin module. Returns its default export (the plugin class or
+ * hook object).
+ *
+ * Two formats (P1-5):
+ *  - 'iife' (PREFERRED for distribution): a pre-bundled IIFE that assigns its
+ *    module exports to `__exports.default` (esbuild: --format=iife
+ *    --global-name=__exports.default) and may `require('@neogebra/sdk')`
+ *    (mapped to the injected SDK). NO source transformation is applied — large
+ *    plugins never go through the regex rewriter.
+ *  - 'esm' (dev convenience): authored ESM source rewritten by
+ *    transformPluginSource. The regex transform can mis-fire on import/export
+ *    look-alikes inside strings or comments, which is why bundled plugins must
+ *    use 'iife'.
+ *
  * @param {string} source raw plugin source
  * @param {object} sdk    the @neogebra/sdk module object
+ * @param {object} [opts] { format: 'esm' | 'iife' }
  */
-export function evaluatePlugin(source, sdk) {
-  const transformed = transformPluginSource(source);
+export function evaluatePlugin(source, sdk, opts = {}) {
+  const format = opts.format === 'iife' ? 'iife' : 'esm';
   const exportsObj = {};
+  if (format === 'iife') {
+    // Map CommonJS-style sdk requires (esbuild `external` output) to the
+    // injected SDK; everything else is refused (plugins are sandbox-bundled).
+    const requireShim = (m) => {
+      if (m === '@neogebra/sdk' || m === '@ggb-extend/sdk') return sdk;
+      throw new Error(`Cannot require "${m}" — bundle all dependencies into the plugin`);
+    };
+    // eslint-disable-next-line no-new-func
+    const fn = new Function('__sdk', '__exports', 'require', `${source}\n;return __exports;`);
+    fn(sdk, exportsObj, requireShim);
+    let def = exportsObj.default;
+    // esbuild's --global-name assigns the module NAMESPACE object; unwrap its
+    // default export when present.
+    if (def && typeof def === 'object' && def.default !== undefined) def = def.default;
+    return def;
+  }
+  const transformed = transformPluginSource(source);
   // `__sdk` and `__exports` are the only injected names.
   // eslint-disable-next-line no-new-func
   const fn = new Function('__sdk', '__exports', `${transformed}\n;return __exports;`);
@@ -72,28 +102,57 @@ export function instantiatePlugin(def, ctx) {
   return def; // plain hooks object
 }
 
+// Watchdog for plugin lifecycle hooks: a hook that never settles (e.g. awaits a
+// request that never resolves) must not stall the whole load chain — that would
+// keep the panel and every later plugin from coming up, and visibly slow
+// GeoGebra's startup. On timeout the plugin is marked failed and loading moves on.
+export const DEFAULT_HOOK_TIMEOUT_MS = 10000;
+
+function withTimeout(promise, ms, label) {
+  if (!ms || ms <= 0) return promise;
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([Promise.resolve(promise), timeout])
+    .finally(() => { if (timer) clearTimeout(timer); });
+}
+
 export class PluginLoader {
   /**
    * @param {object} deps
    * @param {object} deps.sdk           the @neogebra/sdk module
    * @param {object} deps.core          a ready GgbCore (or null in headless)
-   * @param {object} deps.host          the preload bridge (window.ggbExtendHost)
+   * @param {object} deps.host          the preload IPC bridge
    * @param {function} deps.makeStorage (pluginId) => PluginStorage
+   * @param {function} [deps.getRuntime] () => runtime API exposed on ctx.runtime
+   * @param {number}   [deps.hookTimeoutMs] watchdog for lifecycle hooks
    * @param {function} [deps.onLog]
    */
-  constructor({ sdk, core, host, makeStorage, makeNet, onLog }) {
+  constructor({ sdk, core, host, makeStorage, makeNet, getRuntime, hookTimeoutMs, onLog }) {
     this.sdk = sdk;
     this.core = core;
     this.host = host;
     this.makeStorage = makeStorage || (() => new sdk.MemoryStorage());
     // makeNet(pluginId, manifest) → { fetch(url, opts) } | null
     this.makeNet = makeNet || (() => null);
+    this.getRuntime = getRuntime || (() => null);
+    this.hookTimeoutMs = hookTimeoutMs === undefined ? DEFAULT_HOOK_TIMEOUT_MS : hookTimeoutMs;
     this.onLog = onLog || (() => {});
     /** @type {Map<string, object>} id → { manifest, instance, ctx, enabled, builtin, error } */
     this.loaded = new Map();
   }
 
   log(level, msg) { try { this.onLog({ level, msg, ts: Date.now() }); } catch { /* noop */ } }
+
+  /** Run a lifecycle hook under the watchdog. */
+  _lifecycle(instance, phase, ctx) {
+    return withTimeout(
+      this.sdk.runLifecycle(instance, phase, ctx),
+      this.hookTimeoutMs,
+      `${ctx && ctx.id ? ctx.id : 'plugin'}.${phase}`,
+    );
+  }
 
   /**
    * Load a single plugin descriptor. Evaluates + instantiates + runs onLoad.
@@ -106,13 +165,17 @@ export class PluginLoader {
     const manifest = sdk.validateManifest(d.manifest);
     const record = { manifest, instance: null, ctx: null, enabled: !!d.enabled, builtin: !!d.builtin, error: null };
     try {
-      const def = evaluatePlugin(d.source, sdk);
-      const docks = [];
-      const rows = [];
+      const def = evaluatePlugin(d.source, sdk, { format: manifest.format });
+      // Each created dock/row registers its OWN cleanup disposable at creation
+      // time. Disposables are consumed on every disable, so cleanup is tied to
+      // the activation that created the UI: enable→disable→enable→disable tears
+      // down each generation's docks/rows (no DOM or listener leaks across
+      // repeated toggling).
+      let ctx; // assigned below; the ui closures run only after instantiation
       const ui = {
         mountInAlgebraView: (uiOpts = {}) => {
           const dock = sdk.mountInAlgebraView(uiOpts);
-          docks.push(dock);
+          ctx.registerDisposable(() => { try { dock.destroy(); } catch { /* ignore */ } });
           return dock;
         },
         // Create a container that lives inside GeoGebra's algebra list as a
@@ -122,28 +185,26 @@ export class PluginLoader {
         createNativeRow: (rowOpts = {}) => {
           const applet = this.core && this.core.raw ? this.core.raw : undefined;
           const rowHandle = sdk.createNativeRow(applet ? { ...rowOpts, applet } : rowOpts);
-          rows.push(rowHandle);
+          ctx.registerDisposable(() => { try { rowHandle.destroy(); } catch { /* ignore */ } });
           return rowHandle;
         },
         // GeoGebra's own theme tokens (colors/font) so plugins can match the host.
         theme: () => (sdk.readGgbTheme ? sdk.readGgbTheme() : null),
       };
-      const ctx = new sdk.PluginContext({
+      ctx = new sdk.PluginContext({
         core: this.core,
         manifest,
         storage: this.makeStorage(manifest.id),
         host: this.host,
         net: this.makeNet(manifest.id, manifest),
+        runtime: this.getRuntime(),
         ui,
       });
-      // auto-clean any docked panels / native rows when the plugin is torn down
-      ctx.registerDisposable(() => { for (const d of docks) { try { d.destroy(); } catch { /* ignore */ } } });
-      ctx.registerDisposable(() => { for (const r of rows) { try { r.destroy(); } catch { /* ignore */ } } });
       const instance = instantiatePlugin(def, ctx);
       record.instance = instance;
       record.ctx = ctx;
-      await sdk.runLifecycle(instance, 'onLoad', ctx);
-      if (record.enabled) await sdk.runLifecycle(instance, 'onEnable', ctx);
+      await this._lifecycle(instance, 'onLoad', ctx);
+      if (record.enabled) await this._lifecycle(instance, 'onEnable', ctx);
       this.log('ok', `plugin loaded: ${manifest.id}${record.enabled ? ' (enabled)' : ''}`);
     } catch (err) {
       record.error = String(err && err.message ? err.message : err);
@@ -170,7 +231,7 @@ export class PluginLoader {
   async enable(id) {
     const r = this.loaded.get(id);
     if (!r || r.enabled || r.error) return r;
-    await this.sdk.runLifecycle(r.instance, 'onEnable', r.ctx);
+    await this._lifecycle(r.instance, 'onEnable', r.ctx);
     r.enabled = true;
     this.log('ok', `enabled: ${id}`);
     return r;
@@ -181,7 +242,15 @@ export class PluginLoader {
     const r = this.loaded.get(id);
     if (!r || !r.enabled) return r;
     if (r.builtin) { this.log('warn', `refusing to disable builtin: ${id}`); return r; }
-    await this.sdk.runLifecycle(r.instance, 'onDisable', r.ctx);
+    try {
+      await this._lifecycle(r.instance, 'onDisable', r.ctx);
+    } catch (err) {
+      // Watchdog tripped: the hook hung, so runLifecycle's own finally (which
+      // runs the disposables) never executed — run them here so the plugin's
+      // UI is still torn down.
+      this.log('error', `onDisable watchdog: ${id} — ${err && err.message}`);
+      try { r.ctx.runDisposables(); } catch { /* ignore */ }
+    }
     r.enabled = false;
     this.log('ok', `disabled: ${id}`);
     return r;

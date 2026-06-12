@@ -211,8 +211,8 @@ anything. Tips:
 
 - Mount your own element on `document.documentElement` (and remove it on close).
   Consider a high `z-index` and, if you want CSS isolation, a Shadow DOM.
-- Match GeoGebra's theme: `window.__ggbExtendTheme__()` returns `'light'` or
-  `'dark'` (exposed by the built-in panel).
+- Match GeoGebra's theme: `detectThemeMode()` (from `@neogebra/sdk`) returns
+  `'light'` or `'dark'`; `ctx.ui.theme()` returns GeoGebra's own color tokens.
 - Persist user choices with `ctx.storage` (see §5).
 
 ```js
@@ -220,7 +220,7 @@ import { Plugin } from '@neogebra/sdk';
 
 export default class MyPlugin extends Plugin {
   async onOpenSettings(ctx) {
-    const theme = (window.__ggbExtendTheme__ && window.__ggbExtendTheme__()) || 'light';
+    const theme = detectThemeMode(); // from '@neogebra/sdk'
     const bg = theme === 'dark' ? '#2b2d31' : '#fff';
     const fg = theme === 'dark' ? '#ececf0' : '#1d1d1f';
 
@@ -476,7 +476,7 @@ async onEnable(ctx) {
 
 Options: `{ title?, collapsed?, collapsible?, onDockChange?(docked) }`.
 
-Match GeoGebra's theme with `window.__ggbExtendTheme__()` (`'light'`/`'dark'`).
+Match GeoGebra's theme with `detectThemeMode()` from `@neogebra/sdk` (`'light'`/`'dark'`).
 Keep your own styles inside the Shadow DOM so they don't leak into GeoGebra.
 
 ### 6.8 A native row in the algebra list (`ctx.ui.createNativeRow`)
@@ -682,7 +682,36 @@ export default class X extends Plugin { /* ... */ } // class default export
 export default { onEnable() {} };                   // object default export
 ```
 
-Example esbuild bundle command (SDK kept external):
+### Preferred for distribution: pre‑bundled IIFE (`"format": "iife"`)
+
+The ESM rewrites above are a **regex transform — a dev convenience only**. It
+can mis‑fire on `import`/`export` look‑alikes inside strings or comments, and
+the risk grows with plugin size. Published plugins should ship a pre‑built
+IIFE bundle instead, which the loader evaluates **without any transformation**:
+
+```bash
+esbuild src/index.js \
+  --bundle --format=iife --global-name=__exports.default \
+  --platform=browser --external:@neogebra/sdk \
+  --outfile=dist/index.bundle.js
+```
+
+```jsonc
+// manifest.json
+{
+  "main": "dist/index.bundle.js",
+  "format": "iife"
+}
+```
+
+`require('@neogebra/sdk')` inside the bundle resolves to the injected SDK; any
+other `require` is refused (bundle all dependencies). See
+`examples/geogebra-ai-assistant/build.mjs` for a working setup.
+
+### Dev convenience: authored ESM (default)
+
+A single‑file ESM plugin (`"format"` omitted) is rewritten at load time — fine
+while iterating locally. Example esbuild command (SDK kept external):
 
 ```bash
 esbuild src/main.js \

@@ -26,7 +26,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import {
-  mkdtempSync, mkdirSync, cpSync, existsSync, writeFileSync,
+  mkdtempSync, mkdirSync, cpSync, existsSync, writeFileSync, readFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 
@@ -68,14 +68,16 @@ async function resolveElectronBinary() {
 
 function ensureBuilt() {
   const proxyDist = join(repoRoot, 'packages', 'proxy-core', 'dist', 'main.js');
-  const panelBundle = join(repoRoot, 'packages', 'panel', 'dist', 'panel.bundle.js');
-  if (!existsSync(panelBundle)) {
-    log('building panel…');
-    execFileSync('node', [join(repoRoot, 'packages', 'panel', 'build.mjs')], { stdio: 'inherit' });
-  }
-  if (!existsSync(proxyDist)) {
-    log('assembling proxy…');
-    execFileSync('node', [join(repoRoot, 'scripts', 'build-proxy.mjs')], { stdio: 'inherit' });
+  const distPkg = join(repoRoot, 'packages', 'proxy-core', 'dist', 'package.json');
+  // E2E needs a TEST build: the readiness/toggle hooks asserted below are
+  // compiled in only when NGB_TEST_BUILD=1 (production bundles strip them).
+  let isTestBuild = false;
+  try { isTestBuild = JSON.parse(readFileSync(distPkg, 'utf8')).testBuild === true; } catch { /* rebuild */ }
+  if (!existsSync(proxyDist) || !isTestBuild) {
+    log('assembling proxy (test build)…');
+    execFileSync('node', [join(repoRoot, 'scripts', 'build-proxy.mjs')], {
+      stdio: 'inherit', env: { ...process.env, NGB_TEST_BUILD: '1' },
+    });
   }
 }
 
@@ -118,7 +120,7 @@ async function main() {
   const electronApp = await _electron.launch({
     executablePath: typeof electronBin === 'string' ? electronBin : undefined,
     args: [appDir],
-    env: { ...process.env, GGB_EXTEND_AUTOSTART: '1' },
+    env: { ...process.env, GGB_EXTEND_AUTOSTART: '1', GGB_EXTEND_TEST: '1' },
   });
 
   let failed = false;
@@ -132,7 +134,7 @@ async function main() {
       bridge: !!window.ggbExtendHost,
       ready: !!(window.__ggbExtendReady || window.__ggbExtendReady__),
       hasApplet: !!window.ggbApplet,
-      hasHost: !!document.getElementById('ggb-extend-host-root'),
+      hasHost: !!window.__ggbExtendPanelHost__, // host id is session-random; test builds expose the element
       toggle: typeof window.__ggbExtendToggle__ === 'function',
     }));
 

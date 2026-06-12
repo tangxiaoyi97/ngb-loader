@@ -116,11 +116,15 @@ test('plugin toggle writes per-GGB state.json (version isolation)', async () => 
   fs.mkdirSync(pdir, { recursive: true });
   fs.writeFileSync(path.join(pdir, 'manifest.json'), JSON.stringify({ id: 'hello-plugin', name: 'Hello', version: '1.0.0', main: 'src/index.js' }));
 
-  // default: enabled (only explicit false disables)
+  // P2-3: default disabled — only an explicit enable runs the plugin
   let list = await manager.listPlugins(G);
-  assert.strictEqual(list.find((p) => p.id === 'hello-plugin').enabled, true, 'defaults enabled');
+  assert.strictEqual(list.find((p) => p.id === 'hello-plugin').enabled, false, 'defaults disabled (new)');
+  assert.strictEqual(list.find((p) => p.id === 'hello-plugin').status, 'new');
 
-  // disable for this GGB → persisted under targets[G]
+  // enable for this GGB, then disable → persisted under targets[G]
+  await manager.setPluginEnabled(G, 'hello-plugin', true);
+  list = await manager.listPlugins(G);
+  assert.strictEqual(list.find((p) => p.id === 'hello-plugin').enabled, true, 'enabled after explicit toggle');
   await manager.setPluginEnabled(G, 'hello-plugin', false);
   const state = JSON.parse(fs.readFileSync(path.join(pluginsRoot, 'state.json'), 'utf8'));
   assert.strictEqual(state.targets[G].enabled['hello-plugin'], false);
@@ -128,9 +132,10 @@ test('plugin toggle writes per-GGB state.json (version isolation)', async () => 
   list = await manager.listPlugins(G);
   assert.strictEqual(list.find((p) => p.id === 'hello-plugin').enabled, false, 'reflects disabled for this GGB');
 
-  // a DIFFERENT GGB is unaffected
+  // a DIFFERENT GGB is unaffected (still undecided there)
   const other = await manager.listPlugins('ggb-other');
-  assert.strictEqual(other.find((p) => p.id === 'hello-plugin').enabled, true, 'other GGB still enabled');
+  assert.strictEqual(other.find((p) => p.id === 'hello-plugin').enabled, false, 'other GGB: still undecided/new');
+  assert.strictEqual(other.find((p) => p.id === 'hello-plugin').status, 'new');
 });
 
 test('resolveExecutable reads CFBundleExecutable from a mac .app', () => {

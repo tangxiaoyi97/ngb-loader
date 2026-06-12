@@ -17,43 +17,26 @@
 //   - Falls back to a floating panel if the algebra column isn't present.
 //   - All host DOM mutations are reverted on destroy.
 
-const HOST_ATTR = 'data-ngb-dock';
+// P1: GeoGebra locators come from the ggb-dom-adapter (version-profiled);
+// DOM watching goes through the shared observer.
+import { findAlgebraColumn as adapterFindColumn, findMainCanvasRect } from './ggb-dom-adapter.js';
+import { subscribeDom } from './shared-observer.js';
+
+// Session-random, neutral host marker (clean namespace — no framework branding
+// in the live DOM). Exported via __dockInternals for unit tests only.
+const HOST_ATTR = `data-d${Math.random().toString(36).slice(2, 8)}`;
 const COLLAPSED_H = 33;       // title-bar height when collapsed
 const EXPANDED_FRAC = 0.45;   // expanded height as a fraction of the column
 const EXPANDED_MIN = 220;
 const EXPANDED_MAX = 460;
 
-function findMainCanvasRect() {
-  try {
-    const rects = [...document.querySelectorAll('canvas')]
-      .map((c) => c.getBoundingClientRect())
-      .filter((r) => r.width > 200 && r.height > 150)
-      .sort((a, b) => b.width * b.height - a.width * a.height);
-    return rects[0] || null;
-  } catch { return null; }
-}
-
-// The LEFT dock column (algebra side). Distinguished from the graphics column by
-// x position. Returns { column, algebraPanel } or null.
+// The LEFT dock column (algebra side), excluding columns inside our own hosts.
 function findAlgebraColumn() {
-  if (typeof document === 'undefined') return null;
-  const canvas = findMainCanvasRect();
-  const cutoff = canvas ? canvas.left - 8 : 9999;
-  let best = null;
-  for (const col of document.querySelectorAll('.dockPanelParent')) {
-    if (col.closest(`[${HOST_ATTR}]`)) continue;
-    const r = col.getBoundingClientRect();
-    if (r.width < 120 || r.height < 120) continue;
-    if (r.left >= cutoff) continue;                 // skip the graphics column
-    if (!best || r.left < best.r.left) best = { col, r };
-  }
-  if (!best) return null;
-  const algebraPanel = best.col.querySelector('.algebraPanel');
-  return { column: best.col, algebraPanel: algebraPanel || null, rect: best.r };
+  return adapterFindColumn({ excludeAttr: HOST_ATTR });
 }
 
 export function mountInAlgebraView(opts = {}) {
-  const id = opts.id || `ngb-dock-${Math.random().toString(36).slice(2, 8)}`;
+  const id = opts.id || `d${Math.random().toString(36).slice(2, 10)}`;
   let collapsed = !!opts.collapsed;
 
   if (typeof document === 'undefined') {
@@ -123,7 +106,7 @@ export function mountInAlgebraView(opts = {}) {
 
   // Debounced re-attach: GeoGebra rebuilds its DOM a lot during boot, which would
   // otherwise cause flicker. Coalesce bursts and skip work when nothing changed.
-  let observer = null;
+  let unsubscribe = null;   // shared-observer subscription (P1-3)
   let timer = null;
   let lastSig = '';
   const signature = () => {
@@ -145,16 +128,13 @@ export function mountInAlgebraView(opts = {}) {
       }
     }, 120);
   };
-  try {
-    observer = new MutationObserver((mutations) => {
-      for (const m of mutations) {
-        // ignore mutations we caused (inside our own host)
-        if (m.target && m.target.closest && m.target.closest(`[${HOST_ATTR}]`)) continue;
-        if ([...m.addedNodes, ...m.removedNodes].some((n) => n.nodeType === 1)) { scheduleReattach(); break; }
-      }
-    });
-    observer.observe(document.body || document.documentElement, { childList: true, subtree: true });
-  } catch { /* unavailable in tests */ }
+  unsubscribe = subscribeDom((mutations) => {
+    for (const m of mutations) {
+      // ignore mutations we caused (inside our own host)
+      if (m.target && m.target.closest && m.target.closest(`[${HOST_ATTR}]`)) continue;
+      if ([...m.addedNodes, ...m.removedNodes].some((n) => n.nodeType === 1)) { scheduleReattach(); break; }
+    }
+  });
 
   attach();
   lastSig = signature();
@@ -171,12 +151,15 @@ export function mountInAlgebraView(opts = {}) {
     },
     reattach: attach,
     destroy() {
-      try { if (observer) observer.disconnect(); } catch { /* ignore */ }
+      try { if (unsubscribe) unsubscribe(); } catch { /* ignore */ }
       if (timer) clearTimeout(timer);
       restorePanelSpace();
       if (host.parentNode) host.parentNode.removeChild(host);
     },
   };
 }
+
+// Internal constants exposed for unit tests ONLY (session-random by design).
+export const __dockInternals = { HOST_ATTR };
 
 export default mountInAlgebraView;

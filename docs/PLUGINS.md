@@ -16,7 +16,7 @@ GeoGebra starts
     → runtime.boot(): loads the built-in panel FIRST, then enabled user plugins
        - evaluates each plugin's source with the SDK injected
        - runs onLoad → onEnable
-    → window.__ggbExtendRuntime__ is published; the panel lists all loaded plugins
+    → the runtime API is handed to plugins as ctx.runtime; the panel lists all loaded plugins
 ```
 
 The **panel itself is a built-in plugin** (`panel-manager`), loaded through the exact

@@ -16,7 +16,7 @@ test('resolvePluginsRoot is platform-specific and honors override', () => {
   assert.match(resolvePluginsRoot(null, 'win32'), /GeoGebra \(NeoGebra\)[\\/]GGB_Plugins$/);
 });
 
-test('list defaults plugins to enabled; explicit false disables (per-GGB)', async () => {
+test('P2-3: new plugins default DISABLED; only an explicit true enables (per-GGB)', async () => {
   const root = tmpRoot();
   const store = new PluginsStore({ root });
   const G = 'ggb-A';
@@ -26,12 +26,42 @@ test('list defaults plugins to enabled; explicit false disables (per-GGB)', asyn
   }
   let list = await store.list(G);
   assert.strictEqual(list.length, 2);
-  assert.ok(list.every((p) => p.enabled), 'all default enabled');
+  assert.ok(list.every((p) => p.enabled === false), 'freshly dropped-in plugins do NOT run');
+  assert.ok(list.every((p) => p.status === 'new'), 'undecided plugins are marked new');
 
+  await store.setEnabled(G, 'a', true);
   await store.setEnabled(G, 'b', false);
   list = await store.list(G);
   assert.strictEqual(list.find((p) => p.id === 'a').enabled, true);
+  assert.strictEqual(list.find((p) => p.id === 'a').status, 'enabled');
   assert.strictEqual(list.find((p) => p.id === 'b').enabled, false);
+  assert.strictEqual(list.find((p) => p.id === 'b').status, 'disabled');
+});
+
+test('built-in plugins are always listed as enabled', async () => {
+  const root = tmpRoot();
+  const store = new PluginsStore({ root });
+  const G = 'ggb-A';
+  const dir = path.join(root, 'panel-manager');
+  fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify({
+    id: 'panel-manager',
+    name: 'Plugin Panel',
+    version: '1.0.0',
+    builtin: true,
+  }));
+
+  let list = await store.list(G);
+  let panel = list.find((p) => p.id === 'panel-manager');
+  assert.strictEqual(panel.builtin, true);
+  assert.strictEqual(panel.enabled, true, 'built-in panel is enabled on first sight');
+  assert.strictEqual(panel.status, 'enabled');
+
+  await store.setEnabled(G, 'panel-manager', false);
+  list = await store.list(G);
+  panel = list.find((p) => p.id === 'panel-manager');
+  assert.strictEqual(panel.enabled, true, 'stale false state cannot disable a built-in plugin');
+  assert.strictEqual(panel.status, 'enabled');
 });
 
 test('enabled lists are isolated per GGB', async () => {
@@ -40,11 +70,12 @@ test('enabled lists are isolated per GGB', async () => {
   fs.mkdirSync(path.join(root, 'p'));
   fs.writeFileSync(path.join(root, 'p', 'manifest.json'), JSON.stringify({ id: 'p', name: 'P', version: '1.0.0' }));
 
-  await store.setEnabled('ggb-A', 'p', false); // disable for A only
+  await store.setEnabled('ggb-A', 'p', false); // decide for A only
+  await store.setEnabled('ggb-B', 'p', true);  // enable for B only
   const listA = await store.list('ggb-A');
   const listB = await store.list('ggb-B');
   assert.strictEqual(listA.find((x) => x.id === 'p').enabled, false, 'A: disabled');
-  assert.strictEqual(listB.find((x) => x.id === 'p').enabled, true, 'B: still enabled (isolated)');
+  assert.strictEqual(listB.find((x) => x.id === 'p').enabled, true, 'B: enabled (isolated)');
 });
 
 test('setEnabled persists per-target to state.json and round-trips', async () => {

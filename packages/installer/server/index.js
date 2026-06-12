@@ -102,7 +102,7 @@ function createApp({ broadcast }) {
   app.post('/api/uninstall', runOp('uninstall'));
 
   // SPA fallback
-  app.get('*', (_req, res) => {
+  app.get(/.*/, (_req, res) => {
     const indexDist = path.join(WEB_DIST, 'index.html');
     const indexPub = path.join(WEB_PUBLIC, 'index.html');
     if (fs.existsSync(indexDist)) return res.sendFile(indexDist);

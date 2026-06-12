@@ -15,6 +15,84 @@ const { spawn, execFile } = require('child_process');
 // for it and then exits on its own.
 const DONE_MARK = '__NEOGEBRA_DONE__';
 
+function shQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function psQuote(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function buildPosixTailScript(file) {
+  const logFile = shQuote(file);
+  const doneMark = shQuote(DONE_MARK);
+  return `#!/bin/sh
+clear
+echo "Neogebra — following log (finishes when done)"
+echo "------------------------------------------------------"
+log_file=${logFile}
+done_mark=${doneMark}
+fifo="\${TMPDIR:-/tmp}/neogebra-tail.$$"
+tail_pid=
+
+cleanup() {
+  if [ -n "$tail_pid" ]; then kill "$tail_pid" >/dev/null 2>&1; fi
+  rm -f "$fifo"
+}
+trap cleanup EXIT INT TERM
+
+mkfifo "$fifo" || exit 1
+tail -n +1 -F "$log_file" > "$fifo" 2>/dev/null &
+tail_pid=$!
+
+while IFS= read -r line; do
+  case "$line" in
+    *"$done_mark"*) break ;;
+    *) printf '%s\\n' "$line" ;;
+  esac
+done < "$fifo"
+
+cleanup
+trap - EXIT INT TERM
+exit 0
+`;
+}
+
+function buildPowerShellTailScript(file) {
+  const logFile = psQuote(file);
+  const doneMark = psQuote(DONE_MARK);
+  return `$ErrorActionPreference = 'SilentlyContinue'
+Write-Host 'Neogebra - following log (finishes when done)'
+Write-Host '------------------------------------------------------'
+$Path = ${logFile}
+$Done = ${doneMark}
+$Position = 0
+
+while ($true) {
+  if (Test-Path -LiteralPath $Path) {
+    $Stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    try {
+      [void]$Stream.Seek($Position, [System.IO.SeekOrigin]::Begin)
+      $Reader = [System.IO.StreamReader]::new($Stream)
+      try {
+        while (-not $Reader.EndOfStream) {
+          $Line = $Reader.ReadLine()
+          if ($Line -like "*$Done*") { exit 0 }
+          Write-Output $Line
+        }
+        $Position = $Stream.Position
+      } finally {
+        $Reader.Dispose()
+      }
+    } finally {
+      if ($Stream) { $Stream.Dispose() }
+    }
+  }
+  Start-Sleep -Milliseconds 200
+}
+`;
+}
+
 class TerminalLog {
   /** @param {string} dir folder to keep the log file in (e.g. app.getPath('logs')) */
   constructor(dir) {
@@ -58,60 +136,33 @@ class TerminalLog {
     const f = this.file;
     try {
       if (process.platform === 'darwin') {
-        // Read the log in a shell loop (NOT `tail -f | sed`, because tail -f keeps
-        // blocking after sed exits). When we see the sentinel we kill tail and
-        // close THIS Terminal window via AppleScript — matched by the window's
-        // TTY, with `saving no` so macOS doesn't pop a "process running" prompt
-        // (that prompt is what kept the window open).
+        // Tail through a FIFO so the shell can kill tail immediately after the
+        // sentinel. Then let the .command shell exit cleanly. Do not close this
+        // Terminal window via AppleScript from inside the same Terminal session:
+        // macOS will warn that sh/osascript are still running.
         const sh = path.join(this.dir, 'neogebra-tail.command');
-        fs.writeFileSync(sh,
-          `#!/bin/sh\n` +
-          `clear\n` +
-          `echo "Neogebra — following log (auto-closes when finished)"\n` +
-          `echo "------------------------------------------------------"\n` +
-          `tty_dev=$(tty)\n` +
-          `# follow the file, printing new lines, until the sentinel appears\n` +
-          `tail -n +1 -F "${f}" 2>/dev/null | while IFS= read -r line; do\n` +
-          `  case "$line" in\n` +
-          `    *${DONE_MARK}*) break ;;\n` +
-          `    *) printf '%s\\n' "$line" ;;\n` +
-          `  esac\n` +
-          `done\n` +
-          `# stop the lingering tail first so the window has no "busy" process,\n` +
-          `# then close this exact window. Find the target window id first (don't\n` +
-          `# close while iterating), then close by id with no save prompt.\n` +
-          `pkill -P $$ tail >/dev/null 2>&1\n` +
-          `/usr/bin/osascript \\\n` +
-          `  -e "tell application \\"Terminal\\"" \\\n` +
-          `  -e "set wid to missing value" \\\n` +
-          `  -e "repeat with w in windows" \\\n` +
-          `  -e "repeat with t in tabs of w" \\\n` +
-          `  -e "if tty of t is \\"$tty_dev\\" then set wid to id of w" \\\n` +
-          `  -e "end repeat" \\\n` +
-          `  -e "end repeat" \\\n` +
-          `  -e "if wid is not missing value then close (every window whose id is wid) saving no" \\\n` +
-          `  -e "end tell" >/dev/null 2>&1\n` +
-          `exit 0\n`);
+        fs.writeFileSync(sh, buildPosixTailScript(f));
         fs.chmodSync(sh, 0o755);
         execFile('open', ['-a', 'Terminal', sh], (err) => { /* ignore */ });
         return { ok: true };
       }
       if (process.platform === 'win32') {
-        // PowerShell follows the file and breaks out of the loop on the sentinel,
-        // then the window closes (cmd /c, not /k).
-        const ps = `Get-Content -Path '${f.replace(/'/g, "''")}' -Wait -Tail 1000 | ForEach-Object { Write-Output $_; if ($_ -match '${DONE_MARK}') { break } }`;
-        const cmd = `start "Neogebra log" cmd /c powershell -NoLogo -NoProfile -Command "${ps.replace(/"/g, '\\"')}"`;
-        spawn('cmd', ['/c', cmd], { detached: true, stdio: 'ignore', windowsHide: false, shell: false }).unref();
+        // Avoid `Get-Content -Wait | ...`; breaking the consumer can leave the
+        // producer alive. Poll appended bytes directly and exit the cmd window
+        // when the sentinel appears.
+        const ps1 = path.join(this.dir, 'neogebra-tail.ps1');
+        fs.writeFileSync(ps1, buildPowerShellTailScript(f));
+        const safePs1 = ps1.replace(/"/g, '""');
+        const cmd = `start "Neogebra log" cmd /c powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "${safePs1}"`;
+        spawn('cmd.exe', ['/d', '/s', '/c', cmd], { detached: true, stdio: 'ignore', windowsHide: false, shell: false }).unref();
         return { ok: true };
       }
-      // Linux: read loop that breaks on the sentinel (tail -F | while read),
-      // then the terminal closes when its command returns. We also kill the
-      // lingering tail so it doesn't keep the window alive.
-      const tailCmd = `tail -n +1 -F "${f}" 2>/dev/null | while IFS= read -r line; do case "$line" in *${DONE_MARK}*) break;; *) printf '%s\\n' "$line";; esac; done; pkill -P $$ tail 2>/dev/null; exit 0`;
+      // Linux: same FIFO strategy as macOS; terminals close when the shell exits.
+      const tailCmd = buildPosixTailScript(f);
       const candidates = [
         ['gnome-terminal', ['--', 'bash', '-lc', tailCmd]],
         ['konsole', ['-e', 'bash', '-lc', tailCmd]],
-        ['xterm', ['-e', `bash -lc '${tailCmd}'`]],
+        ['xterm', ['-e', 'bash', '-lc', tailCmd]],
       ];
       const tryNext = (i) => {
         if (i >= candidates.length) return;
@@ -128,4 +179,8 @@ class TerminalLog {
   }
 }
 
-module.exports = { TerminalLog };
+module.exports = {
+  TerminalLog,
+  DONE_MARK,
+  _internals: { buildPosixTailScript, buildPowerShellTailScript, shQuote, psQuote },
+};

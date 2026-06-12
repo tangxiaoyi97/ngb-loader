@@ -14,7 +14,7 @@ export const T = {
   blue: '#1a73e8',
   red: '#d93b39',
   redSoft: '#fdeceb',
-  // semantic colors used by logs/toasts/the plugin toggle (NOT the status dot)
+  // semantic colors used by logs/toasts (NOT the plugin toggle or status dot)
   green: '#16a34a',
   greenSoft: '#e7f7ee',
   amber: '#e8950c',

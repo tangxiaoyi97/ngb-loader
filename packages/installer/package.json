@@ -1,6 +1,6 @@
 {
   "name": "@neogebra/installer",
-  "version": "1.8.0",
+  "version": "2.0.0-beta",
   "description": "Neogebra graphical installer — Express + WebSocket server bridging a React/Tailwind wizard to the injection engine.",
   "license": "MIT",
   "type": "commonjs",
@@ -11,12 +11,12 @@
   },
   "dependencies": {
     "@neogebra/injector-core": "*",
-    "express": "^4.19.2",
-    "ws": "^8.18.0"
+    "express": "^5.2.1",
+    "ws": "^8.21.0"
   },
   "devDependencies": {
-    "esbuild": "^0.21.5",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "esbuild": "^0.28.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
   }
 }

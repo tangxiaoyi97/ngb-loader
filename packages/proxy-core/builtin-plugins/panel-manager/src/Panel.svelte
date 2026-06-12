@@ -9,8 +9,15 @@
   export let theme = 'light';  // 'light' | 'dark' — follows GeoGebra
   /** Ask the host controller to close, so focus/pointer cleanup runs in one place. */
   export let requestClose = () => { open = false; };
+  /** i18n (P3-5): provided by panel-manager from the host language. */
+  export let t = (k) => k;
+  /** Host font (P3-2): GeoGebra's own font family. */
+  export let hostFont = '';
+  /** Summon gestures (P3-3), persisted by panel-manager. */
+  export let gestures = { rightShift: true, tripleCtrl: true };
+  export let onGesturesChange = () => {};
 
-  const APP_VERSION = '1.8.0';
+  const APP_VERSION = '2.0.0-beta';
   const GITHUB_URL = 'https://github.com/tangxiaoyi97/ngb-loader';
   const DEPS = [
     ['Electron', 'desktop app runtime'],
@@ -29,9 +36,14 @@
   let plugins = [];
   let selectedId = null; // when set, show that plugin's detail page
   let isMock = runtime && runtime.isMock;
+  // P1-2: low-key adaptation notice. When the DOM self-check failed, native
+  // integrations are silently disabled — this one line (only visible after the
+  // user deliberately opened the panel) is the only place that says so.
+  let degraded = false;
 
   function refresh() {
     try { plugins = runtime.listPlugins() || []; } catch (e) { plugins = []; }
+    try { degraded = !!(runtime.domHealth && runtime.domHealth().ok === false); } catch (e) { degraded = false; }
   }
 
   async function openSettings(p) {
@@ -47,8 +59,44 @@
 
   function openFolder() { try { runtime.openPluginFolder && runtime.openPluginFolder(); } catch (e) {} }
 
-  const select = (p) => { selectedId = p.id; };
-  const back = () => { selectedId = null; };
+  // Open links in the SYSTEM browser (an <a target=_blank> would spawn an
+  // Electron window inside GeoGebra).
+  function openLink(url) {
+    try {
+      if (runtime.openExternal) { runtime.openExternal(url); return; }
+    } catch (e) { /* fall through */ }
+    try { window.open(url, '_blank', 'noopener'); } catch (e) { /* ignore */ }
+  }
+
+  // P3-3: gesture checkboxes — never let both go off (panel must stay reachable).
+  function setGesture(key, value) {
+    const next = { ...gestures, [key]: value };
+    if (!next.rightShift && !next.tripleCtrl) { gestures = { ...gestures }; return; }
+    gestures = next;
+    try { onGesturesChange(next); } catch (e) { /* ignore */ }
+  }
+
+  $: footerHint = gestures.rightShift ? t('hintShift') : t('hintCtrl');
+
+  // Network permissions for the selected plugin (declared hosts + this GGB's
+  // recorded decisions). Loaded when the detail page opens.
+  let netInfo = null;
+  async function loadNet(id) {
+    netInfo = null;
+    try { netInfo = runtime.netPermissions ? await runtime.netPermissions(id) : null; } catch (e) { netInfo = null; }
+  }
+  // declared hosts ∪ hosts with a recorded decision (covers legacy records)
+  $: netHosts = netInfo
+    ? [...new Set([...(netInfo.declared || []), ...Object.keys(netInfo.approvals || {})])]
+    : [];
+
+  async function revokeHost(h) {
+    try { runtime.revokeNetApproval && await runtime.revokeNetApproval(selectedId, h); } catch (e) { /* ignore */ }
+    await loadNet(selectedId);
+  }
+
+  const select = (p) => { selectedId = p.id; loadNet(p.id); };
+  const back = () => { selectedId = null; netInfo = null; };
   $: selected = plugins.find((p) => p.id === selectedId) || null;
 
   let lastOpen = false;
@@ -58,7 +106,7 @@
 
 {#if open}
   <div class="bk {theme}" transition:fade={{ duration: 160 }} on:click={() => requestClose()} on:keydown role="button" tabindex="-1" aria-label="Close"></div>
-  <aside class="panel {theme}" transition:fly={{ x: 380, duration: 300, easing: cubicOut }} role="dialog" aria-label="Neogebra plugins">
+  <div class="panel {theme}" style={hostFont ? `font-family:${hostFont}` : ''} transition:fly={{ x: 380, duration: 300, easing: cubicOut }} role="dialog" aria-label="Neogebra plugins">
     <header>
       <div class="brand">
         <svg class="logo" width="22" height="22" viewBox="0 0 1920 1920" aria-hidden="true">
@@ -74,15 +122,15 @@
           </g>
           <circle cx="920" cy="1000" r="185" fill="#6557d3" />
         </svg>
-        <div><h1>Neogebra</h1><span class="sub">Plugins {isMock ? '· preview' : ''}</span></div>
+        <div><h1>Neogebra</h1><span class="sub">{t('sub')} {isMock ? '· preview' : ''}</span></div>
       </div>
       <button class="icon" on:click={() => requestClose()} aria-label="Close">✕</button>
     </header>
 
     {#if !selected}
       <nav class="tabs">
-        <button class:active={view === 'plugins'} on:click={() => (view = 'plugins')}>Plugins</button>
-        <button class:active={view === 'settings'} on:click={() => (view = 'settings')}>About</button>
+        <button class:active={view === 'plugins'} on:click={() => (view = 'plugins')}>{t('tabPlugins')}</button>
+        <button class:active={view === 'settings'} on:click={() => (view = 'settings')}>{t('tabAbout')}</button>
       </nav>
     {/if}
 
@@ -90,7 +138,7 @@
       {#if selected}
         <!-- plugin detail page — slides + fades in from the right -->
         <div class="page" in:fly|global={{ x: 30, duration: 280, easing: cubicOut }}>
-          <button class="back" on:click={back} aria-label="Back to plugins">‹ Plugins</button>
+          <button class="back" on:click={back} aria-label="Back to plugins">{t('back')}</button>
           <div class="detail">
             <div class="d-head">
               {#if selected.icon}
@@ -101,25 +149,52 @@
               <div class="d-title">
                 <h2>{selected.name}</h2>
                 <div class="d-meta">v{selected.version}{selected.author ? ` · ${selected.author}` : ''}</div>
-                {#if selected.builtin}<span class="badge">built-in</span>{/if}
+                {#if selected.builtin}<span class="badge">{t('badgeBuiltin')}</span>{/if}
               </div>
             </div>
             {#if selected.error}<p class="err">⚠ {selected.error}</p>{/if}
             {#if selected.description}<p class="d-desc">{selected.description}</p>{/if}
             <button class="set wide" on:click={() => openSettings(selected)} disabled={!selected.hasSettings}>
-              {selected.hasSettings ? 'Open settings' : 'No settings'}
+              {selected.hasSettings ? t('openSettings') : t('noSettings')}
             </button>
+
+            {#if netHosts.length > 0}
+              <div class="net">
+                <h4>{t('netTitle')}</h4>
+                <ul class="net-list">
+                  {#each netHosts as h (h)}
+                    <li class="net-row">
+                      <span class="net-host" title={h}>{h}</span>
+                      {#if netInfo.approvals[h] === true}
+                        <span class="net-state ok">{t('netApproved')}</span>
+                        <button class="net-revoke" on:click={() => revokeHost(h)}>{t('netRevoke')}</button>
+                      {:else if netInfo.approvals[h] === false}
+                        <span class="net-state no">{t('netBlocked')}</span>
+                        <button class="net-revoke" on:click={() => revokeHost(h)}>{t('netRevoke')}</button>
+                      {:else}
+                        <span class="net-state">{t('netNotAsked')}</span>
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+                <p class="net-note">{t('netNote')}</p>
+              </div>
+            {/if}
           </div>
         </div>
       {:else if view === 'plugins'}
         <div class="page" in:fly|global={{ x: -24, duration: 260, easing: cubicOut }}>
           <div class="toolbar">
-            <span class="count">{plugins.length} {plugins.length === 1 ? 'plugin' : 'plugins'}</span>
-            <button class="ghost" on:click={refresh}>Refresh</button>
+            <span class="count">{plugins.length === 1 ? t('countOne') : t('countMany', plugins.length)}</span>
+            <button class="ghost" on:click={refresh}>{t('refresh')}</button>
           </div>
 
+          {#if degraded}
+            <p class="adapt-note">{t('adaptNote')}</p>
+          {/if}
+
           {#if plugins.length === 0}
-            <div class="empty"><p>No plugins yet.</p><small>Add them in the Neogebra manager.</small></div>
+            <div class="empty"><p>{t('emptyTitle')}</p><small>{t('emptyHint')}</small></div>
           {:else}
             <ul class="list">
               {#each plugins as p, i (p.id)}
@@ -146,9 +221,22 @@
             <span class="about-name">Neogebra Loader</span>
             <span class="about-ver">v{APP_VERSION}</span>
           </div>
-          <p>A lightweight, non-invasive plugin framework for GeoGebra. It boots through a proxy layer and never modifies GeoGebra's own files in place.</p>
+          <p>{t('aboutDesc')}</p>
 
-          <a class="link" href={GITHUB_URL} target="_blank" rel="noopener">★ GitHub repository</a>
+          <div class="gestures">
+            <h4>{t('gestureTitle')}</h4>
+            <label class="gest">
+              <input type="checkbox" checked={gestures.rightShift} on:change={(e) => setGesture('rightShift', e.target.checked)} />
+              {t('gestureRightShift')}
+            </label>
+            <label class="gest">
+              <input type="checkbox" checked={gestures.tripleCtrl} on:change={(e) => setGesture('tripleCtrl', e.target.checked)} />
+              {t('gestureTripleCtrl')}
+            </label>
+            <p class="gest-note">{t('gestureNote')}</p>
+          </div>
+
+          <button class="link" type="button" on:click={() => openLink(GITHUB_URL)}>★ GitHub repository</button>
 
           <div class="ack">
             <h4>Open-source acknowledgements</h4>
@@ -167,8 +255,8 @@
       {/if}
     </div>
 
-    <footer><span>v1.8.0</span><span class="hint">Right-Shift to toggle</span></footer>
-  </aside>
+    <footer><span>v{APP_VERSION}</span><span class="hint">{footerHint}</span></footer>
+  </div>
 {/if}
 
 <style>
@@ -176,6 +264,7 @@
   :host { all: initial; }
   .panel, .bk {
     --gx-accent: #6557d3; --gx-accent-soft: rgba(101,87,211,.12);
+    /* Fallback only — the live host font is applied inline on the panel (P3-2). */
     font-family: 'Roboto', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Segoe UI', sans-serif;
   }
   .panel.light {
@@ -209,6 +298,7 @@
   .body { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 4px 14px 14px; position: relative; }
   .page { display: block; }
   .toolbar { display: flex; align-items: center; justify-content: space-between; margin: 6px 2px 10px; }
+  .adapt-note { font-size: 11.5px; line-height: 1.5; color: var(--gx-sub); margin: 0 2px 10px; opacity: .85; }
   .count { color: var(--gx-sub); font-size: 12px; }
   .ghost { all: unset; cursor: pointer; font-size: 12px; padding: 6px 11px; border-radius: 8px; color: var(--gx-sub); border: 1px solid var(--gx-border); margin-left: 6px; font-family: inherit; }
   .ghost:hover { background: var(--gx-fill-hover); }
@@ -239,12 +329,32 @@
   .set:hover:not(:disabled) { filter: brightness(1.06); }
   .set:disabled { opacity: .5; cursor: default; background: var(--gx-fill); color: var(--gx-dim); border: 1px solid var(--gx-border); }
   .set.wide { display: block; padding: 11px; font-size: 13px; }
+  .set.wide + .set.wide { margin-top: 8px; }
+  .set.secondary { background: var(--gx-fill); color: var(--gx-fg); border: 1px solid var(--gx-border); }
+  .set.secondary:hover:not(:disabled) { background: var(--gx-fill-hover); filter: none; }
+  .note { margin: 8px 2px 0; font-size: 11.5px; color: var(--gx-sub); }
+  .gestures { border-top: 1px solid var(--gx-border); padding-top: 10px; margin-bottom: 12px; }
+  .gestures h4 { margin: 10px 0 6px; font-size: 12px; font-weight: 500; color: var(--gx-fg); }
+  .gest { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--gx-fg); padding: 4px 0; cursor: pointer; }
+  .gest input { accent-color: var(--gx-accent); }
+  .gest-note { margin: 4px 0 0; font-size: 11px; color: var(--gx-dim); }
+  .net { border-top: 1px solid var(--gx-border); margin-top: 16px; padding-top: 8px; }
+  .net h4 { margin: 6px 0 8px; font-size: 12px; font-weight: 500; color: var(--gx-fg); }
+  .net-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+  .net-row { display: flex; align-items: center; gap: 8px; padding: 6px 9px; border: 1px solid var(--gx-border); border-radius: 8px; background: var(--gx-fill); }
+  .net-host { flex: 1; min-width: 0; font-size: 12px; color: var(--gx-fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .net-state { flex-shrink: 0; font-size: 10.5px; padding: 1px 7px; border-radius: 10px; background: var(--gx-fill-hover); color: var(--gx-dim); }
+  .net-state.ok { background: rgba(30,142,62,.12); color: #1e8e3e; }
+  .net-state.no { background: rgba(217,48,37,.10); color: #d93025; }
+  .net-revoke { all: unset; cursor: pointer; flex-shrink: 0; font-size: 11px; padding: 3px 9px; border-radius: 7px; color: var(--gx-sub); border: 1px solid var(--gx-border); font-family: inherit; }
+  .net-revoke:hover { background: var(--gx-fill-hover); color: var(--gx-fg); }
+  .net-note { margin: 8px 2px 0; font-size: 11px; line-height: 1.5; color: var(--gx-dim); }
   .empty { text-align: center; color: var(--gx-sub); padding: 36px 12px; display: flex; flex-direction: column; gap: 10px; align-items: center; }
   .about p { margin: 0 0 10px; font-size: 12px; line-height: 1.55; color: var(--gx-sub); }
   .about-head { display: flex; align-items: baseline; gap: 8px; margin: 6px 0 8px; }
   .about-name { font-size: 16px; font-weight: 500; color: var(--gx-fg); }
   .about-ver { font-size: 12px; color: var(--gx-dim); }
-  .about .link { display: inline-block; font-size: 12px; color: var(--gx-accent); text-decoration: none; padding: 7px 12px; border: 1px solid var(--gx-border); border-radius: 8px; margin-bottom: 12px; }
+  .about .link { all: unset; cursor: pointer; box-sizing: border-box; display: block; width: 100%; text-align: center; font-size: 12px; font-weight: 500; font-family: inherit; color: var(--gx-accent); padding: 9px 12px; border: 1px solid var(--gx-border); border-radius: 9px; margin: 2px 0 14px; }
   .about .link:hover { background: var(--gx-fill-hover); }
   .ack { border-top: 1px solid var(--gx-border); padding-top: 10px; }
   .ack h4 { margin: 10px 0 4px; font-size: 12px; font-weight: 500; color: var(--gx-fg); }

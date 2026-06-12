@@ -10,6 +10,12 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
+// Row/container DOM markers are session-random (clean namespace) — resolve them
+// from the SDK's test-only internals export.
+const { __internals } = require('../../packages/sdk/src/algebra-row.js');
+const ROW = __internals.ROW_ATTR;
+const BOX = __internals.CONTAINER_ATTR;
+
 function haveJsdom() { try { require.resolve('jsdom'); return true; } catch { return false; } }
 
 function withDom(fn) {
@@ -87,7 +93,7 @@ test('hijacks a native object row: takes over .elemText, hides GeoGebra bits', {
     assert.strictEqual(handle.objectName, 'ngbUItest');
     // our content node is inside the row's .elemText
     assert.ok(handle.element, 'exposes a content element');
-    const row = ggb._av.querySelector('[data-ngb-row="ngbUItest"]');
+    const row = ggb._av.querySelector(`[${ROW}="ngbUItest"]`);
     assert.ok(row, 'row is marked as ours');
     // GeoGebra's own bits are hidden
     assert.strictEqual(row.querySelector('.marblePanel').style.display, 'none');
@@ -95,11 +101,11 @@ test('hijacks a native object row: takes over .elemText, hides GeoGebra bits', {
     assert.strictEqual(row.querySelector('.algebraViewObjectStylebar').style.display, 'none');
     // the original definition text is gone (we cleared .elemText and put our host)
     assert.ok(!row.textContent.includes('ngbUItest = true'), 'GeoGebra text replaced');
-    assert.ok(row.querySelector('[data-ngb-container="ngbUItest"]'), 'our host is mounted');
+    assert.ok(row.querySelector(`[${BOX}="ngbUItest"]`), 'our host is mounted');
 
     handle.destroy();
     assert.ok(!handle.isAlive(), 'not alive after destroy');
-    assert.ok(!ggb._av.querySelector('[data-ngb-row="ngbUItest"]'), 'row removed (object deleted) on destroy');
+    assert.ok(!ggb._av.querySelector(`[${ROW}="ngbUItest"]`), 'row removed (object deleted) on destroy');
   });
 });
 
@@ -115,14 +121,15 @@ test('hybrid mode: keeps marble + stylebar, routes marble click to plugin, preve
       onMarbleClick: () => { pluginMarbleRan = true; },
     });
     assert.strictEqual(handle.mode, 'hybrid');
-    const row = ggb._av.querySelector('[data-ngb-row="ngbHyb"]');
+    const row = ggb._av.querySelector(`[${ROW}="ngbHyb"]`);
     const marble = row.querySelector('.marblePanel');
     const stylebar = row.querySelector('.algebraViewObjectStylebar');
-    // marble + stylebar are KEPT (not hidden) in hybrid mode
+    // marble is KEPT (plugin-controlled); the ⋯ stylebar is HIDDEN (P3-2: its
+    // menu would operate on the hidden helper object and expose internals)
     assert.notStrictEqual(marble.style.display, 'none', 'marble kept');
-    assert.notStrictEqual(stylebar.style.display, 'none', 'stylebar (⋯ menu) kept');
+    assert.strictEqual(stylebar.style.display, 'none', 'stylebar (⋯ menu) hidden — helper object not exposed');
     // our content host still mounted in the text area
-    assert.ok(row.querySelector('[data-ngb-container="ngbHyb"]'), 'content host mounted');
+    assert.ok(row.querySelector(`[${BOX}="ngbHyb"]`), 'content host mounted');
 
     // Attach a native handler AFTER ours to confirm ours stops propagation/default.
     marble.addEventListener('click', () => { nativeMarbleRan = true; });
@@ -177,7 +184,7 @@ test('native marble ball: filled toggle + onMarbleClick api + expand state', { s
 
     // clicking the marble toggles expand (via onMarbleClick → api.toggle)
     assert.strictEqual(handle.isExpanded(), false);
-    const panel = ggb._av.querySelector('[data-ngb-row="ngbBall"] .marblePanel');
+    const panel = ggb._av.querySelector(`[${ROW}="ngbBall"] .marblePanel`);
     panel.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
     assert.strictEqual(handle.isExpanded(), true, 'click expanded it');
     assert.strictEqual(expandedChanges, 1, 'onExpandedChange fired once');
@@ -221,7 +228,7 @@ test('frees the row height so content drives it, and restores styles on destroy'
     // Pre-set a one-line height constraint like GeoGebra would.
     const seedRow = () => ggb._av.querySelector('.avItem');
     const handle = createNativeRow({ applet: ggb, name: 'ngbUIh' });
-    const row = ggb._av.querySelector('[data-ngb-row="ngbUIh"]');
+    const row = ggb._av.querySelector(`[${ROW}="ngbUIh"]`);
     const elem = row.querySelector('.elem');
     const content = row.querySelector('.elemText');
 
@@ -246,7 +253,7 @@ test('isolates events: clicks inside the container do not reach GeoGebra (the ro
     const { createNativeRow } = require('../../packages/sdk/src/algebra-row.js');
     const ggb = makeFakeGgb(window);
     const handle = createNativeRow({ applet: ggb, name: 'ngbUIevt' });
-    const row = ggb._av.querySelector('[data-ngb-row="ngbUIevt"]');
+    const row = ggb._av.querySelector(`[${ROW}="ngbUIevt"]`);
 
     // Simulate GeoGebra's mid-bubble listener on the .avItem row.
     let geogebraSawIt = false;
@@ -313,7 +320,7 @@ test('applet arrives late → handle attaches once it becomes ready', { skip: !h
     window.ggbApplet = ggb;
     await new Promise((r) => setTimeout(r, 320)); // past poll (80ms) + attach retries (60ms)
     assert.ok(handle.isAlive(), 'attached after applet became available');
-    assert.ok(ggb._av.querySelector('[data-ngb-row="ngbUIlate"]'), 'hijacked the row');
+    assert.ok(ggb._av.querySelector(`[${ROW}="ngbUIlate"]`), 'hijacked the row');
     handle.destroy();
   } finally {
     Object.assign(g, saved);

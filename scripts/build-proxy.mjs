@@ -53,6 +53,9 @@ function copy(src, dest) {
 // the injected app) exactly which proxy build was installed.
 const pkg = JSON.parse(readFileSync(proxyPkg, 'utf8'));
 pkg.builtAt = new Date().toISOString();
+// Mark test builds (E2E hooks compiled in) so they are never mistaken for a
+// production artifact.
+if (process.env.NGB_TEST_BUILD === '1') pkg.testBuild = true;
 writeFileSync(join(out, 'package.json'), JSON.stringify(pkg, null, 2));
 copy(join(proxySrc, 'main.js'), join(out, 'main.js'));
 copy(join(proxySrc, 'preload.js'), join(out, 'preload.js'));

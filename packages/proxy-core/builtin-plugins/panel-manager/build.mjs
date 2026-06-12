@@ -16,9 +16,15 @@ await build({
   platform: 'browser',
   target: ['chrome110'],
   minify: false,
+  // Dead-branch removal without mangling: strips `if (false) {…}` test-hook
+  // blocks (from the define below) out of production bundles.
+  minifySyntax: true,
   // The SDK is provided by the runtime loader at eval time — keep the import.
   external: ['@neogebra/sdk'],
-  plugins: [esbuildSvelte({ compilerOptions: { css: 'injected' } })],
+  // E2E hooks are compiled in ONLY for test builds (NGB_TEST_BUILD=1) and
+  // dead-code eliminated from production bundles.
+  define: { __NGB_TEST_BUILD__: process.env.NGB_TEST_BUILD === '1' ? 'true' : 'false' },
+  plugins: [esbuildSvelte({ compilerOptions: { css: 'injected', compatibility: { componentApi: 4 } } })],
   logLevel: 'info',
 });
 console.log('[panel-manager] built dist/index.bundle.js');

@@ -214,10 +214,16 @@ test('get-plugin-list reads manifests; toggle persists state', async () => {
   assert.strictEqual(list1.ok, true);
   assert.strictEqual(list1.plugins.length, 1);
   assert.strictEqual(list1.plugins[0].id, 'hello-plugin');
-  // A freshly dropped-in plugin defaults to ENABLED (only explicit false disables).
-  assert.strictEqual(list1.plugins[0].enabled, true, 'defaults to enabled');
+  // P2-3: a freshly dropped-in plugin is DISABLED until the user enables it.
+  assert.strictEqual(list1.plugins[0].enabled, false, 'defaults to disabled');
+  assert.strictEqual(list1.plugins[0].status, 'new', 'undecided plugins are marked new');
 
-  // toggle OFF persists (per-target) and is reflected
+  // toggle ON persists, then OFF again
+  const on = await electron.__invoke('ggb-extend:toggle-plugin', { id: 'hello-plugin', enabled: true });
+  assert.strictEqual(on.ok, true);
+  const listOn = await electron.__invoke('ggb-extend:get-plugin-list');
+  assert.strictEqual(listOn.plugins[0].enabled, true, 'enabled after explicit toggle');
+
   const toggled = await electron.__invoke('ggb-extend:toggle-plugin', { id: 'hello-plugin', enabled: false });
   assert.strictEqual(toggled.ok, true);
   assert.ok(toggled.ggbId, 'toggle returns the ggbId it wrote');
@@ -226,6 +232,35 @@ test('get-plugin-list reads manifests; toggle persists state', async () => {
 
   const list2 = await electron.__invoke('ggb-extend:get-plugin-list');
   assert.strictEqual(list2.plugins[0].enabled, false, 'disabled reflected after toggle');
+});
+
+test('built-in plugins stay enabled in proxy plugin lists', async () => {
+  const userData = freshUserData();
+  const electron = makeElectronStub(userData);
+  const proxy = loadProxyFresh(electron);
+  const p = proxy.registerIpc(electron);
+
+  const pluginDir = path.join(p.root, 'panel-manager');
+  fs.mkdirSync(pluginDir, { recursive: true });
+  fs.writeFileSync(path.join(pluginDir, 'manifest.json'), JSON.stringify({
+    id: 'panel-manager',
+    name: 'Plugin Panel',
+    version: '1.0.0',
+    author: 'Neogebra',
+    main: 'index.js',
+    builtin: true,
+  }));
+
+  let list = await electron.__invoke('ggb-extend:get-plugin-list');
+  let panel = list.plugins.find((x) => x.id === 'panel-manager');
+  assert.strictEqual(panel.enabled, true, 'built-in panel is enabled on first sight');
+  assert.strictEqual(panel.status, 'enabled');
+
+  await electron.__invoke('ggb-extend:toggle-plugin', { id: 'panel-manager', enabled: false });
+  list = await electron.__invoke('ggb-extend:get-plugin-list');
+  panel = list.plugins.find((x) => x.id === 'panel-manager');
+  assert.strictEqual(panel.enabled, true, 'stale false state cannot disable a built-in plugin');
+  assert.strictEqual(panel.status, 'enabled');
 });
 
 test('open-plugin-folder calls shell.openPath with the plugins root', async () => {
@@ -295,17 +330,26 @@ test('net-fetch IPC path: reads manifest perms + approvals, and SSRF still wins'
     JSON.stringify({ id: 'ai', name: 'AI', version: '1.0.0', main: 'index.js', permissions: { network: ['127.0.0.1'] } }));
   fs.writeFileSync(path.join(p.root, 'ai', 'index.js'), 'export default {}');
 
-  // undeclared host → ENOTDECLARED (manifest perms read correctly through IPC)
+  // P2-2: obtain the plugin's capability token first (callers must prove identity)
+  const issued = await electron.__invoke('ggb-extend:issue-net-tokens');
+  const token = issued.tokens.ai;
+  assert.ok(token, 'token issued for the plugin');
+
+  // without a token → EBADCALLER (self-reported pluginId proves nothing)
   let res = await electron.__invoke('ggb-extend:net-fetch', { pluginId: 'ai', url: 'https://api.openai.com/x' });
+  assert.strictEqual(res.code, 'EBADCALLER');
+
+  // undeclared host → ENOTDECLARED (manifest perms read correctly through IPC)
+  res = await electron.__invoke('ggb-extend:net-fetch', { pluginId: 'ai', token, url: 'https://api.openai.com/x' });
   assert.strictEqual(res.code, 'ENOTDECLARED');
 
   // declared but not approved → needsApproval
-  res = await electron.__invoke('ggb-extend:net-fetch', { pluginId: 'ai', url: 'https://127.0.0.1/x' });
+  res = await electron.__invoke('ggb-extend:net-fetch', { pluginId: 'ai', token, url: 'https://127.0.0.1/x' });
   assert.strictEqual(res.needsApproval, true);
 
   // approve it (persists to state.json) → now SSRF guard blocks loopback
-  await electron.__invoke('ggb-extend:net-approve', { pluginId: 'ai', host: '127.0.0.1', allow: true });
-  res = await electron.__invoke('ggb-extend:net-fetch', { pluginId: 'ai', url: 'https://127.0.0.1/x' });
+  await electron.__invoke('ggb-extend:net-approve', { pluginId: 'ai', host: '127.0.0.1', allow: true, token });
+  res = await electron.__invoke('ggb-extend:net-fetch', { pluginId: 'ai', token, url: 'https://127.0.0.1/x' });
   assert.strictEqual(res.ok, false);
   assert.match(res.error, /Blocked host/);
 });

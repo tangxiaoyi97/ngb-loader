@@ -84,7 +84,7 @@
   ></div>
 
   <!-- Sliding glass sidebar -->
-  <aside
+  <div
     class="ggbx-panel"
     style="--ggbx-opacity: {panelOpacity}"
     transition:fly={{ x: 380, duration: 320, easing: cubicOut }}
@@ -149,7 +149,7 @@
       <span>v0.1.0</span>
       <span class="ggbx-hint">Right-Shift to toggle</span>
     </footer>
-  </aside>
+  </div>
 {/if}
 
 <style>

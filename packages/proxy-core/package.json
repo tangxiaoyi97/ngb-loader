@@ -1,15 +1,15 @@
 {
   "name": "ggb-extend-proxy",
   "productName": "GeoGebra (NeoGebra)",
-  "version": "1.8.0",
+  "version": "2.0.0-beta",
   "description": "Neogebra proxy core — boots before GeoGebra, patches BrowserWindow to inject our preload, exposes plugin-management IPC, then hands control to the original core.",
   "license": "MIT",
   "main": "main.js",
   "private": true,
   "ggbExtend": true,
   "devDependencies": {
-    "esbuild": "^0.21.5",
-    "esbuild-svelte": "^0.8.1",
-    "svelte": "^4.2.18"
+    "esbuild": "^0.28.0",
+    "esbuild-svelte": "^0.9.5",
+    "svelte": "^5.56.3"
   }
 }

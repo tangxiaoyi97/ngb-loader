@@ -1,6 +1,6 @@
 {
   "name": "@neogebra/desktop",
-  "version": "1.8.0",
+  "version": "2.0.0-beta",
   "description": "Neogebra — a desktop manager that installs a lightweight plugin framework into GeoGebra and manages each install's plugins.",
   "license": "MIT",
   "author": "唐晓翼 <tangxy97@hotmail.com>",
@@ -14,15 +14,12 @@
     "pack": "npm run build:renderer && npm run prepack:assets && electron-builder --dir",
     "dist": "npm run build:renderer && npm run prepack:assets && electron-builder"
   },
-  "dependencies": {
-    "fs-extra": "^11.2.0"
-  },
   "devDependencies": {
-    "electron": "^31.0.0",
-    "electron-builder": "^24.13.3",
-    "esbuild": "^0.21.5",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "electron": "42.4.0",
+    "electron-builder": "^26.15.2",
+    "esbuild": "^0.28.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
   },
   "build": {
     "appId": "org.neogebra.loader",
@@ -44,6 +41,7 @@
       }
     ],
     "asar": true,
+    "beforeBuild": "scripts/before-build.cjs",
     "mac": {
       "category": "public.app-category.developer-tools",
       "target": [

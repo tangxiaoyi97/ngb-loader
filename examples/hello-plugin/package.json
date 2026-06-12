@@ -1,6 +1,6 @@
 {
   "name": "@neogebra/example-hello-plugin",
-  "version": "1.8.0",
+  "version": "2.0.0-beta",
   "description": "Reference Neogebra plugin.",
   "license": "MIT",
   "type": "module",
