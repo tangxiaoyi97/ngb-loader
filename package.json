@@ -2,7 +2,7 @@
   "name": "neogebra",
   "version": "2.0.0-beta",
   "private": true,
-  "description": "Neogebra — a lightweight, non-invasive plugin framework for the GeoGebra desktop app. A desktop manager injects a proxy layer that loads plugins dynamically at startup, without modifying GeoGebra's own code.",
+  "description": "Neogebra — a lightweight plugin framework for the GeoGebra desktop app.",
   "license": "MIT",
   "homepage": "https://github.com/tangxiaoyi97/ngb-loader",
   "workspaces": [
