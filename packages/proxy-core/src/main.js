@@ -346,8 +346,18 @@ function netFetch(request = {}, ctx = {}) {
       resolve({ ok: false, status: 0, error: `Method not allowed: ${method}` }); return;
     }
 
-    let body;
-    if (request.body !== undefined && request.body !== null && method !== 'GET') {
+    // Body may be a string / JSON-serializable value (sent as text), OR raw
+    // binary supplied as base64 via `request.bodyBase64` (for multipart uploads
+    // like audio transcription — IPC structured-clone can't carry a Blob, and a
+    // utf8 string would corrupt binary, so the plugin base64-encodes the bytes).
+    let body;            // string body
+    let bodyBuf;         // Buffer body (binary)
+    const MAX_BODY = 25 * 1024 * 1024; // allow audio clips; Whisper caps at 25MB
+    if (request.bodyBase64 !== undefined && request.bodyBase64 !== null && method !== 'GET') {
+      try { bodyBuf = Buffer.from(String(request.bodyBase64), 'base64'); }
+      catch { resolve({ ok: false, status: 0, error: 'Invalid base64 body' }); return; }
+      if (bodyBuf.length > MAX_BODY) { resolve({ ok: false, status: 0, error: 'Request body too large' }); return; }
+    } else if (request.body !== undefined && request.body !== null && method !== 'GET') {
       body = typeof request.body === 'string' ? request.body : (() => {
         try { return JSON.stringify(request.body); } catch { return undefined; }
       })();
@@ -359,7 +369,10 @@ function netFetch(request = {}, ctx = {}) {
     for (const k of Object.keys(headers)) {
       if (/^(host|content-length)$/i.test(k)) delete headers[k];
     }
-    if (body !== undefined) {
+    if (bodyBuf !== undefined) {
+      // Binary: caller MUST set its own Content-Type (e.g. multipart boundary).
+      headers['Content-Length'] = bodyBuf.length;
+    } else if (body !== undefined) {
       if (!Object.keys(headers).some((k) => /^content-type$/i.test(k))) headers['Content-Type'] = 'application/json';
       headers['Content-Length'] = Buffer.byteLength(body);
     }
@@ -416,7 +429,8 @@ function netFetch(request = {}, ctx = {}) {
     });
     req.on('timeout', () => req.destroy(new Error('Request timed out')));
     req.on('error', (err) => resolve({ ok: false, status: 0, error: err && err.message ? err.message : String(err) }));
-    if (body !== undefined) req.write(body);
+    if (bodyBuf !== undefined) req.write(bodyBuf);
+    else if (body !== undefined) req.write(body);
     req.end();
   });
 }

@@ -310,15 +310,27 @@ export function createNativeRow(opts = {}) {
   // stop propagation at our host (bubble phase, before the event reaches the row)
   // so GeoGebra's listeners never see it — while the event still works normally
   // inside our own Shadow DOM (its handlers already ran before this host).
+  //
+  // IMPORTANT (text selection): GeoGebra's algebra view sets `user-select: none`
+  // and calls preventDefault on `selectstart`/`mousedown` to stop the user from
+  // selecting object text. Our content inherits that, so plugin UIs (chat bubbles,
+  // inputs) became un-selectable. We DON'T want to swallow `selectstart` (that is
+  // the very event GeoGebra abuses to block selection): instead we let it through
+  // our host UNtouched, stop it from reaching GeoGebra, and re-enable selection in
+  // CSS on the content node (see buildHost). The net effect: selection works
+  // inside our UI, GeoGebra never sees the event.
   const ISOLATED_EVENTS = [
     'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick',
     'contextmenu', 'keydown', 'keyup', 'keypress', 'input', 'change',
     'focusin', 'focusout', 'wheel', 'touchstart', 'touchend',
+    'selectstart', 'selectionchange', 'copy', 'cut', 'paste',
   ];
   function isolateEvents(hostEl) {
     const stop = (e) => { e.stopPropagation(); };
     for (const type of ISOLATED_EVENTS) {
       // Bubble phase on the host: fires after our inner handlers, before the row.
+      // We only stopPropagation (NOT preventDefault), so the browser's native
+      // text-selection / clipboard behaviour inside our Shadow DOM is preserved.
       hostEl.addEventListener(type, stop);
     }
   }
@@ -332,7 +344,13 @@ export function createNativeRow(opts = {}) {
     h.style.cssText = css;
     const sh = h.attachShadow({ mode: 'closed' });
     const content = document.createElement('div');
-    content.style.cssText = css;
+    // Re-enable text selection inside our UI: GeoGebra's algebra view forces
+    // `user-select: none` on its rows and our content would inherit it. We opt
+    // back in here (the content host is a Shadow root, so this does not leak out
+    // and re-enable selection of GeoGebra's own object rows). Individual plugin
+    // elements can still opt out with their own `user-select: none`.
+    const selectable = 'user-select: text; -webkit-user-select: text; cursor: auto;';
+    content.style.cssText = `${css} ${selectable}`;
     sh.appendChild(content);
     isolateEvents(h);
     return { h, sh, content };

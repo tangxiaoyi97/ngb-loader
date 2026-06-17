@@ -102,7 +102,7 @@ async function boot(opts = {}) {
     if (!host || typeof host.netFetch !== 'function') return null;
     const token = netTokens[pluginId];
     const fetch = async (url, fetchOpts = {}) => {
-      const request = { pluginId, token, url, method: fetchOpts.method, headers: fetchOpts.headers, body: fetchOpts.body, timeoutMs: fetchOpts.timeoutMs };
+      const request = { pluginId, token, url, method: fetchOpts.method, headers: fetchOpts.headers, body: fetchOpts.body, bodyBase64: fetchOpts.bodyBase64, timeoutMs: fetchOpts.timeoutMs };
       let res = await host.netFetch(request);
       if (res && res.needsApproval && typeof host.netApprove === 'function') {
         const allow = await confirmNetAccess(manifest, res.host);
