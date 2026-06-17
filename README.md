@@ -1,4 +1,4 @@
-# Neogebra
+# Neogebra Launcher
 
 **A lightweight, non‑invasive plugin framework for the GeoGebra desktop app.**
 
@@ -8,7 +8,7 @@ build) without modifying any of GeoGebra's own code. A small desktop manager
 your plugins on demand. The original app is always backed up and a one‑click
 restore puts everything back, byte‑for‑byte.
 
-> **Version:** 1.0.0 · macOS & Windows · Repository:
+> **Version:** 2.0.0beta · macOS & Windows · Repository:
 > <https://github.com/tangxiaoyi97/ngb-loader>
 
 ---

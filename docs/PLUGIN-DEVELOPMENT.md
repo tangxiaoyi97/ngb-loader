@@ -410,10 +410,34 @@ Manifest:
 | `method` | `'GET'｜'POST'｜'PUT'｜'DELETE'｜'PATCH'` | `'GET'` |
 | `headers` | object | — |
 | `body` | string or JSON-serializable value (sent as JSON) | — |
+| `bodyBase64` | base64 string of raw bytes — for **binary uploads** (e.g. multipart audio). Mutually exclusive with `body`; you set your own `Content-Type`. Max 25 MB. | — |
 | `timeoutMs` | number (1000–120000) | 60000 |
 
 Returns `{ ok, status, statusText, headers, data, text, error }` — `data` is the
 parsed JSON body (or `null`), `text` the raw body.
+
+**Binary uploads (`bodyBase64`).** IPC can't carry a `Blob`, and a UTF-8 string
+would corrupt binary, so raw bytes are passed base64-encoded via `bodyBase64`.
+The host decodes them and writes the exact bytes — the request body is byte-for-byte
+what you encoded. Build the multipart body with the platform's native `FormData`
+encoder (don't hand-roll it), read its bytes, and base64 them:
+
+```js
+// Transcribe a recorded audio Blob (e.g. from MediaRecorder) via Whisper.
+const form = new FormData();
+form.append('model', 'whisper-1');
+form.append('file', new File([blob], 'audio.webm', { type: blob.type }));
+const encoded = new Response(form);                       // native multipart encoder
+const contentType = encoded.headers.get('content-type'); // includes the boundary
+const buf = new Uint8Array(await encoded.arrayBuffer());
+let bin = ''; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+
+const res = await ctx.net.fetch('https://api.openai.com/v1/audio/transcriptions', {
+  method: 'POST',
+  headers: { 'Content-Type': contentType, Authorization: `Bearer ${key}` },
+  bodyBase64: btoa(bin),
+});
+```
 
 Example — an AI chat plugin (the plugin manages its own API key via `ctx.storage`,
 the framework never sees it):
@@ -593,6 +617,12 @@ Notes:
 | `isFilled()` / `setFilled(b)` / `toggleFilled()` | the native ball's solid/outline state. |
 | `setMarbleColor(c)` | recolour the native ball. |
 | `isExpanded()` / `setExpanded(b)` / `expand()` / `collapse()` / `toggleExpanded()` | framework-tracked expand state; fires `onExpandedChange`. |
+
+**Text is selectable.** GeoGebra's algebra view forces `user-select: none` and
+suppresses `selectstart` to stop object-row text being selected; the framework
+opts your content back in, so text you render into `element` can be selected and
+copied normally (and the pointer/clipboard events stay isolated from GeoGebra).
+An individual element can still opt out with its own `user-select: none`.
 
 The two example plugins — `examples/container-playground` (override / hybrid / switch
 demos) and `examples/geogebra-ai-assistant` (a hybrid conversation row) — are the
