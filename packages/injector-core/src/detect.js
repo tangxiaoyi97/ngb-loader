@@ -75,11 +75,21 @@ function candidateRoots(platform = process.platform, env = process.env) {
   }
   if (platform === 'win32') {
     const roots = [];
-    if (env.LOCALAPPDATA) roots.push(path.join(env.LOCALAPPDATA, 'Programs'));
+    // Per-user install (no admin needed) — GeoGebra's NSIS installer defaults here.
+    if (env.LOCALAPPDATA) {
+      roots.push(path.join(env.LOCALAPPDATA, 'Programs'));
+      roots.push(path.join(env.LOCALAPPDATA, 'Programs', 'geogebra-classic'));
+    }
+    // Machine-wide installs (need admin to modify).
     if (env.ProgramFiles) roots.push(env.ProgramFiles);
     if (env['ProgramFiles(x86)']) roots.push(env['ProgramFiles(x86)']);
-    roots.push('C\\\\Program Files'.replace('\\\\', '\\'));
-    return roots;
+    // Fallbacks if the env vars are missing (rare). Use the real drive from
+    // SystemDrive when available, defaulting to C:.
+    const sysDrive = (env.SystemDrive || 'C:').replace(/\\+$/, '');
+    roots.push(`${sysDrive}\\Program Files`);
+    roots.push(`${sysDrive}\\Program Files (x86)`);
+    // De-duplicate while preserving order.
+    return [...new Set(roots)];
   }
   // linux / other
   return [
@@ -281,14 +291,20 @@ function describeTarget(inputPath, platform = process.platform) {
 function scan(platform = process.platform, env = process.env) {
   const found = [];
   const seen = new Set();
-  for (const root of candidateRoots(platform, env)) {
-    for (const hit of scanRoot(root)) {
-      const target = describeTarget(hit, platform);
-      if (target && !seen.has(target.resources)) {
-        seen.add(target.resources);
-        found.push(target);
-      }
+  const consider = (hit) => {
+    const target = describeTarget(hit, platform);
+    if (target && !seen.has(target.resources)) {
+      seen.add(target.resources);
+      found.push(target);
     }
+  };
+  for (const root of candidateRoots(platform, env)) {
+    // A root may itself BE an install dir (e.g. Windows
+    // %LOCALAPPDATA%\Programs\geogebra-classic), so try it directly…
+    consider(root);
+    // …and also scan one level down for "GeoGebra*" entries (the common case on
+    // macOS /Applications and Windows Program Files).
+    for (const hit of scanRoot(root)) consider(hit);
   }
   return found;
 }

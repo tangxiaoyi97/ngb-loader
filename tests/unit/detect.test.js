@@ -115,3 +115,29 @@ test('candidateRoots are platform-specific', () => {
   const win = detect.candidateRoots('win32', { LOCALAPPDATA: 'C:\\Users\\x\\AppData\\Local', ProgramFiles: 'C:\\Program Files' });
   assert.ok(win.some((p) => p.includes('Programs')));
 });
+
+test('windows candidateRoots: valid Program Files path (regression: no broken C\\Program)', () => {
+  const win = detect.candidateRoots('win32', {
+    LOCALAPPDATA: 'C:\\Users\\x\\AppData\\Local',
+    ProgramFiles: 'C:\\Program Files',
+    'ProgramFiles(x86)': 'C:\\Program Files (x86)',
+    SystemDrive: 'C:',
+  });
+  // Every root that mentions "Program Files" must include a drive colon — the old
+  // code produced "C\Program Files" (no colon), which never matched a real path.
+  for (const p of win) {
+    if (/Program Files/.test(p)) assert.match(p, /:/, `root missing drive colon: ${p}`);
+  }
+  // Per-user install root (no admin) is present and ordered before Program Files.
+  const perUser = win.findIndex((p) => /AppData\\Local[\\/]Programs/.test(p));
+  const progFiles = win.findIndex((p) => /Program Files$/.test(p));
+  assert.ok(perUser >= 0, 'per-user Programs root present');
+  assert.ok(progFiles < 0 || perUser < progFiles, 'per-user root comes before Program Files');
+  // No duplicates.
+  assert.strictEqual(win.length, new Set(win).size, 'roots are de-duplicated');
+});
+
+test('windows candidateRoots: falls back to SystemDrive when env vars missing', () => {
+  const win = detect.candidateRoots('win32', { SystemDrive: 'D:' });
+  assert.ok(win.some((p) => p === 'D:\\Program Files'));
+});

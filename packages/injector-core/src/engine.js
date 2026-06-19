@@ -209,6 +209,50 @@ async function checkWritable(fs, resources) {
   }
 }
 
+/**
+ * Build a platform-specific, actionable permission-denied message. `resources`
+ * is the dir we couldn't write; `reason` is the underlying errno (EACCES/EPERM/
+ * EROFS/EBUSY/…). The aim is that the user can copy a command and succeed.
+ */
+function permissionGuidance(resources, reason, platform = process.platform) {
+  const base = path.dirname(path.dirname(resources)); // the .app or install dir
+  if (platform === 'win32') {
+    return [
+      `No write permission in ${resources} (${reason}).`,
+      'Fix: 1) Fully quit GeoGebra (check the system tray) — Windows locks files of a running app.',
+      '     2) Re-run this in an ELEVATED terminal: right-click PowerShell or Command Prompt →',
+      '        "Run as administrator", then run the inject command again.',
+      `     (Per-user installs under %LOCALAPPDATA%\\Programs usually need NO admin; only`,
+      '      "Program Files" installs do.)',
+    ].join('\n');
+  }
+  if (platform === 'darwin') {
+    return [
+      `No write permission in ${resources} (${reason}).`,
+      'Fix: 1) Fully quit GeoGebra (⌘Q) — a running app can block the change.',
+      `     2) Re-run with elevated privileges, e.g.:  sudo <the same command>`,
+      `     If the app is in /Applications and still fails, it may be on a read-only or`,
+      '     managed volume — copy GeoGebra to ~/Applications and inject that copy instead.',
+    ].join('\n');
+  }
+  return [
+    `No write permission in ${resources} (${reason}).`,
+    'Fix: quit GeoGebra, then re-run with sudo, or install GeoGebra somewhere you own',
+    '     (e.g. ~/.local) and inject that copy.',
+  ].join('\n');
+}
+
+/**
+ * Classify a filesystem error from a rename/copy during inject so we can give a
+ * precise hint. Returns one of: 'permission' | 'busy' | 'other'.
+ */
+function classifyFsError(err) {
+  const code = err && err.code;
+  if (code === 'EACCES' || code === 'EPERM' || code === 'EROFS') return 'permission';
+  if (code === 'EBUSY' || code === 'ETXTBSY') return 'busy';
+  return 'other';
+}
+
 /* ------------------------------------------------------------------ *
  * Core operations: inject & uninstall
  * ------------------------------------------------------------------ */
@@ -298,8 +342,7 @@ async function inject(target, opts = {}) {
     const perm = await checkWritable(fs, resources);
     if (!perm.writable) {
       throw new EngineError(
-        `No write permission in ${resources} (${perm.reason}). ` +
-        `Re-run with elevated privileges (sudo on macOS/Linux, "Run as administrator" on Windows).`,
+        permissionGuidance(resources, perm.reason, target.platform || process.platform),
         'EPERM'
       );
     }
@@ -325,31 +368,73 @@ async function inject(target, opts = {}) {
     backupInfo = await copyExternalBackup(fs, { resources, isAsar, appPath, backupDir: opts.backupDir }, log);
   }
 
-  // 1) Rename original app(.asar) -> core(.asar)
-  log.step(`Renaming ${path.basename(appPath)} → ${path.basename(corePath)} (safe backup)`);
-  await fs.move(appPath, corePath, { overwrite: false });
-
-  // For the asar variant there may be an app.asar.unpacked sibling — move it too.
-  if (isAsar) {
-    const unpackedSrc = path.join(resources, 'app.asar.unpacked');
-    const unpackedDst = path.join(resources, 'core.asar.unpacked');
-    if (await fs.pathExists(unpackedSrc)) {
-      log.step('Renaming app.asar.unpacked → core.asar.unpacked');
-      await fs.move(unpackedSrc, unpackedDst, { overwrite: false });
+  // Steps 1–3 mutate the bundle. If a LATER step fails (commonly a permission
+  // or app-locked error mid-way), we must not leave GeoGebra half-injected
+  // (original renamed away, no working proxy = unbootable). We track what we did
+  // and roll back on any failure so the bundle returns to pristine.
+  const undo = [];           // LIFO list of async rollback steps
+  let movedAppToCore = false;
+  let movedUnpacked = false;
+  let manifest = null;
+  const rollback = async () => {
+    log.warn('Inject failed — rolling back to avoid a half-injected (unbootable) app…');
+    for (const step of undo.reverse()) {
+      try { await step(); } catch (e) { log.error(`rollback step failed: ${e && e.message ? e.message : e}`); }
     }
+  };
+
+  try {
+    // 1) Rename original app(.asar) -> core(.asar)
+    log.step(`Renaming ${path.basename(appPath)} → ${path.basename(corePath)} (safe backup)`);
+    await fs.move(appPath, corePath, { overwrite: false });
+    movedAppToCore = true;
+    undo.push(async () => { if (movedAppToCore) await fs.move(corePath, appPath, { overwrite: false }); });
+
+    // For the asar variant there may be an app.asar.unpacked sibling — move it too.
+    if (isAsar) {
+      const unpackedSrc = path.join(resources, 'app.asar.unpacked');
+      const unpackedDst = path.join(resources, 'core.asar.unpacked');
+      if (await fs.pathExists(unpackedSrc)) {
+        log.step('Renaming app.asar.unpacked → core.asar.unpacked');
+        await fs.move(unpackedSrc, unpackedDst, { overwrite: false });
+        movedUnpacked = true;
+        undo.push(async () => { if (movedUnpacked) await fs.move(unpackedDst, unpackedSrc, { overwrite: false }); });
+      }
+    }
+
+    // 2) Drop the proxy where Electron will find it first (a *folder* named app).
+    //    Even for the asar variant, the proxy is an unpacked folder — Electron
+    //    resolves `Resources/app` before `Resources/*.asar`, so this works for both.
+    //    (For asar, proxyPath=app/ differs from the now-renamed core.asar.)
+    log.step('Installing proxy folder (app/)');
+    await placeProxy(fs, proxyPath, opts.proxyDir, log);
+    // For the folder layout proxyPath === appPath, so the rename-back above
+    // already restores the original; only remove a freshly-made proxy for asar.
+    if (proxyPath !== appPath) undo.push(async () => { if (await fs.pathExists(proxyPath)) await fs.remove(proxyPath); });
+
+    // 3) Write the manifest describing exactly what we changed, for clean uninstall.
+    manifest = baselineManifest(target, { appPath, corePath, bakPath });
+    if (backupInfo) manifest.externalBackup = backupInfo;
+    await writeManifest(fs, resources, manifest);
+  } catch (err) {
+    await rollback();
+    const klass = classifyFsError(err);
+    if (klass === 'permission') {
+      throw new EngineError(permissionGuidance(resources, err.code, target.platform || process.platform), 'EPERM');
+    }
+    if (klass === 'busy') {
+      throw new EngineError(
+        `A file in ${resources} is in use (${err.code}). Fully quit GeoGebra and try again. ` +
+        `The app was rolled back to its original state.`,
+        'EBUSY'
+      );
+    }
+    throw new EngineError(
+      `Injection failed (${err && err.code ? err.code : 'error'}): ${err && err.message ? err.message : err}. ` +
+      `The app was rolled back to its original state.`,
+      'EINJECT'
+    );
   }
-
-  // 2) Drop the proxy where Electron will find it first (a *folder* named app).
-  //    Even for the asar variant, the proxy is an unpacked folder — Electron
-  //    resolves `Resources/app` before `Resources/*.asar`, so this works for both.
-  //    (For asar, proxyPath=app/ differs from the now-renamed core.asar.)
-  log.step('Installing proxy folder (app/)');
-  await placeProxy(fs, proxyPath, opts.proxyDir, log);
-
-  // 3) Write the manifest describing exactly what we changed, for clean uninstall.
-  const manifest = baselineManifest(target, { appPath, corePath, bakPath });
-  if (backupInfo) manifest.externalBackup = backupInfo;
-  await writeManifest(fs, resources, manifest);
 
   // 4) macOS: a signed .app no longer matches its signature after we changed
   //    Resources/. Clear quarantine + ad-hoc re-sign so it stays launchable.
@@ -543,7 +628,7 @@ async function uninstall(target, opts = {}) {
     const perm = await checkWritable(fs, resources);
     if (!perm.writable) {
       throw new EngineError(
-        `No write permission in ${resources} (${perm.reason}). Re-run elevated.`,
+        permissionGuidance(resources, perm.reason, target.platform || process.platform),
         'EPERM'
       );
     }
@@ -604,6 +689,8 @@ module.exports = {
   restoreFromExternalBackup,
   placeProxy,
   checkWritable,
+  permissionGuidance,
+  classifyFsError,
   // public API
   inject,
   uninstall,

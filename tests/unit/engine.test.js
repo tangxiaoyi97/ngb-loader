@@ -183,3 +183,43 @@ test('uninstall on pristine is a safe no-op', async () => {
   assert.strictEqual(res.changed, false);
   assert.strictEqual(res.reason, 'not-injected');
 });
+
+test('permissionGuidance is platform-specific and actionable', () => {
+  const win = engine.permissionGuidance('C:\\Program Files\\GeoGebra\\resources', 'EACCES', 'win32');
+  assert.match(win, /administrator/i);
+  assert.match(win, /quit GeoGebra/i);
+  const mac = engine.permissionGuidance('/Applications/GeoGebra.app/Contents/Resources', 'EACCES', 'darwin');
+  assert.match(mac, /sudo/);
+  assert.match(mac, /~\/Applications/);
+});
+
+test('classifyFsError maps errno to category', () => {
+  assert.strictEqual(engine.classifyFsError({ code: 'EACCES' }), 'permission');
+  assert.strictEqual(engine.classifyFsError({ code: 'EPERM' }), 'permission');
+  assert.strictEqual(engine.classifyFsError({ code: 'EBUSY' }), 'busy');
+  assert.strictEqual(engine.classifyFsError({ code: 'ENOENT' }), 'other');
+});
+
+test('inject rolls back to pristine if a mutation fails mid-way (no half-injected brick)', async () => {
+  // Fake fs: pristine packaged app; rename works, but installing the proxy
+  // folder (ensureDir on app/) is denied — the engine must undo the rename.
+  const state = new Set(['/R/app.asar']);
+  const fakeFs = {
+    pathExists: async (p) => state.has(p),
+    ensureDir: async (p) => { if (p === '/R/app') { const e = new Error('denied'); e.code = 'EACCES'; throw e; } state.add(p); },
+    move: async (a, b) => { if (!state.has(a)) throw new Error('missing ' + a); state.delete(a); state.add(b); },
+    copy: async () => {},
+    remove: async (p) => { state.delete(p); },
+    writeFile: async (p) => { state.add(p); },
+    writeJson: async (p) => { state.add(p); },
+    readJson: async () => ({}),
+  };
+  const target = { resources: '/R', kind: 'asar', platform: 'win32', version: '6' };
+  await assert.rejects(
+    () => engine.inject(target, { fs: fakeFs, proxyDir: null, onLog: () => {} }),
+    (err) => err.code === 'EPERM'
+  );
+  // Pristine again: original restored, no leftover core.
+  assert.ok(state.has('/R/app.asar'), 'original app.asar restored after rollback');
+  assert.ok(!state.has('/R/core.asar'), 'no leftover core.asar after rollback');
+});

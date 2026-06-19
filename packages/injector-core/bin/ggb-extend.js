@@ -287,7 +287,17 @@ async function main() {
     }
   } catch (err) {
     if (err instanceof core.EngineError) {
-      console.error(`\n${red('Error')} [${err.code}] ${err.message}`);
+      // Messages may be multi-line (permission/elevation guidance). Print the
+      // first line as the headline and indent the rest so it stays readable.
+      const lines = String(err.message).split('\n');
+      console.error(`\n${red('Error')} [${err.code}] ${lines[0]}`);
+      for (const extra of lines.slice(1)) console.error(extra ? `        ${extra}` : '');
+      // A nudge that the elevated re-run is the usual fix for these.
+      if (err.code === 'EPERM' || err.code === 'EBUSY') {
+        const plat = args.platform || process.platform;
+        if (plat === 'win32') console.error(dim('\nTip: run the same command in a terminal opened with "Run as administrator".'));
+        else console.error(dim('\nTip: prefix the same command with sudo, e.g.  sudo npm run cli -- inject --path "…"'));
+      }
     } else {
       console.error(`\n${red('Unexpected error:')} ${err && err.stack ? err.stack : err}`);
     }
